@@ -1,0 +1,80 @@
+# Bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+*.cover
+.hypothesis/
+
+# Virtual environments (runtime packages install into Blender, not this repo)
+.venv/
+venv/
+ENV/
+env/
+
+# Packaging / distribution
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+
+# Blender extension build output (see blender_manifest.toml [build])
+*.zip
+
+# Downloaded MediaPipe model and accidental local dependency trees
+# (normal installs live under Blender user folders — never commit them)
+*.task
+hand_landmarker.task
+addon_deps/
+.vendor/
+vendor/
+
+# Webcam / debug captures (do not commit camera dumps)
+captures/
+recordings/
+frames/
+*.mp4
+*.avi
+*.mkv
+*.webm
+*.mov
+
+# Blender local scene files and autosaves
+*.blend
+*.blend1
+*.blend2
+*.blend@
+
+# Editor and OS
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials*
+secrets*
+
+# Logs and temp
+*.log
+tmp/
+temp/
+.cache/

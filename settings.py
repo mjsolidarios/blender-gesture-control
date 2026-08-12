@@ -15,6 +15,14 @@ from bpy.props import (BoolProperty, EnumProperty, FloatProperty,
 from bpy.types import PropertyGroup
 
 
+# Capture resolution presets: (width, height).
+_CAPTURE_PRESETS = {
+    "LOW": (320, 240),
+    "MEDIUM": (640, 480),
+    "HIGH": (1280, 720),
+}
+
+
 def _restart_note(self, context):
     """Flag settings that only take effect when the camera is reopened."""
     from . import session
@@ -34,14 +42,107 @@ def _pinch_open_changed(self, context):
         self.pinch_on = max(self.pinch_off - 0.02, 0.10)
 
 
+def _capture_preset_changed(self, context):
+    """Apply a named resolution preset, or leave custom dimensions alone."""
+    size = _CAPTURE_PRESETS.get(self.capture_preset)
+    if size is not None:
+        width, height = size
+        if self.capture_width != width:
+            self.capture_width = width
+        if self.capture_height != height:
+            self.capture_height = height
+    _restart_note(self, context)
+
+
+def _capture_size_changed(self, context):
+    """Keep the preset enum in sync when width/height are edited directly."""
+    matched = "CUSTOM"
+    for key, (width, height) in _CAPTURE_PRESETS.items():
+        if self.capture_width == width and self.capture_height == height:
+            matched = key
+            break
+    if self.capture_preset != matched:
+        # Avoid re-entering the preset callback with a no-op assignment.
+        self["capture_preset"] = matched
+    _restart_note(self, context)
+
+
+def _camera_items(self, context):
+    """Dynamic camera list from the last Detect Cameras probe."""
+    from . import session
+    found = session.camera_list()
+    if found:
+        items = [(str(index), desc, f"Use camera index {index}")
+                 for index, desc in found]
+    else:
+        items = [(str(i), f"Camera {i}", f"Device index {i}")
+                 for i in range(6)]
+    items.append(("CUSTOM", "Other index…",
+                  "Type a camera index manually"))
+    return items
+
+
+def _camera_choice_changed(self, context):
+    if self.camera_choice != "CUSTOM":
+        try:
+            index = int(self.camera_choice)
+        except ValueError:
+            index = 0
+        if self.camera_index != index:
+            self.camera_index = index
+    _restart_note(self, context)
+
+
+def _camera_index_changed(self, context):
+    """Keep the picker enum aligned with the numeric index."""
+    from . import session
+    found = {str(index) for index, _ in session.camera_list()}
+    key = str(self.camera_index)
+    if found and key not in found:
+        key = "CUSTOM"
+    elif not found and self.camera_index > 5:
+        key = "CUSTOM"
+    if self.camera_choice != key:
+        self["camera_choice"] = key
+    _restart_note(self, context)
+
+
+def _overlay_detail_changed(self, context):
+    """Apply a display density preset without wiping custom preview layout."""
+    if self.overlay_detail == "MINIMAL":
+        self.show_skeleton = True
+        self.show_landmark_indices = False
+        self.show_hand_labels = False
+        self.show_hud = True
+        self.overlay_opacity = 0.45
+        self.landmark_size = 4.0
+        self.bone_width = 1.5
+    elif self.overlay_detail == "FULL":
+        self.show_skeleton = True
+        self.show_landmark_indices = False
+        self.show_hand_labels = True
+        self.show_hud = True
+        self.overlay_opacity = 0.65
+        self.landmark_size = 5.0
+        self.bone_width = 2.5
+
+
 class HGC_Settings(PropertyGroup):
     # -- camera ------------------------------------------------------------
 
-    camera_index: IntProperty(
+    camera_choice: EnumProperty(
         name="Camera",
-        description="Index of the capture device. 0 is the default webcam",
+        description="Capture device. Press Detect Cameras to list devices "
+                    "that respond on this machine",
+        items=_camera_items,
+        update=_camera_choice_changed,
+    )
+    camera_index: IntProperty(
+        name="Camera Index",
+        description="Index of the capture device. 0 is usually the default "
+                    "webcam",
         default=0, min=0, max=15,
-        update=_restart_note,
+        update=_camera_index_changed,
     )
     camera_backend: EnumProperty(
         name="Backend",
@@ -58,15 +159,28 @@ class HGC_Settings(PropertyGroup):
         default="AUTO",
         update=_restart_note,
     )
+    capture_preset: EnumProperty(
+        name="Resolution",
+        description="Capture size. Lower is faster; higher tracks small "
+                    "motions better",
+        items=(
+            ("LOW", "320 × 240 (Fast)", "Lowest cost, coarser tracking"),
+            ("MEDIUM", "640 × 480 (Default)", "Balanced speed and accuracy"),
+            ("HIGH", "1280 × 720 (Detail)", "Best for small hand motions"),
+            ("CUSTOM", "Custom", "Set width and height manually"),
+        ),
+        default="MEDIUM",
+        update=_capture_preset_changed,
+    )
     capture_width: IntProperty(
         name="Capture Width", default=640, min=160, max=1920, step=32,
         description="Frame width requested from the camera. Larger frames "
                     "track small hand motions better but cost more per frame",
-        update=_restart_note,
+        update=_capture_size_changed,
     )
     capture_height: IntProperty(
         name="Capture Height", default=480, min=120, max=1080, step=32,
-        update=_restart_note,
+        update=_capture_size_changed,
     )
     num_hands: IntProperty(
         name="Max Hands", default=2, min=1, max=4,
@@ -118,20 +232,22 @@ class HGC_Settings(PropertyGroup):
     # -- gesture -----------------------------------------------------------
 
     pinch_on: FloatProperty(
-        name="Pinch Closes", default=0.40, min=0.10, max=1.20,
-        description="Thumb-to-fingertip distance, as a fraction of hand size, "
-                    "at which a pinch grabs",
+        name="Pick Closes", default=0.48, min=0.10, max=1.20,
+        description="Average thumb-to-fingertip distance (index, middle, ring, "
+                    "pinky), as a fraction of hand size, at which the pick grab "
+                    "engages",
         update=_pinch_close_changed,
     )
     pinch_off: FloatProperty(
-        name="Pinch Opens", default=0.58, min=0.12, max=1.50,
-        description="Distance at which the pinch lets go. Keeping this above "
-                    "'Pinch Closes' stops the grip flickering",
+        name="Pick Opens", default=0.68, min=0.12, max=1.50,
+        description="Average distance at which the pick lets go. Keep this "
+                    "above 'Pick Closes' to stop the grip flickering",
         update=_pinch_open_changed,
     )
     move_sensitivity: FloatProperty(
         name="Move", default=1.0, min=0.05, max=5.0,
-        description="Screen distance travelled per unit of hand movement",
+        description="Screen distance travelled per unit of hand movement "
+                    "while picking",
     )
     use_depth: BoolProperty(
         name="Depth From Hand Size", default=True,
@@ -143,18 +259,33 @@ class HGC_Settings(PropertyGroup):
     )
     rotate_sensitivity: FloatProperty(
         name="Rotate", default=1.0, min=0.05, max=5.0,
-        description="Multiplier on the rotation copied from your hand",
+        description="Multiplier on rotation copied from hand twist while "
+                    "picking",
     )
     scale_sensitivity: FloatProperty(
         name="Scale", default=1.5, min=0.05, max=8.0,
+        description="Multiplier on two-handed scale (spread / close hands)",
     )
     use_two_hand: BoolProperty(
-        name="Two-Handed Gestures", default=True,
-        description="Pinch with both index fingers to scale and roll at once",
+        name="Two-Handed Scale", default=True,
+        description="Pick with both hands to scale (spread or close). "
+                    "Single-hand scale is not available",
     )
     two_hand_translate: BoolProperty(
         name="Two-Handed Move", default=True,
-        description="Also translate when both hands move together",
+        description="Also translate when both picking hands move together",
+    )
+    use_point_select: BoolProperty(
+        name="Point to Select", default=True,
+        description="Extend only the index finger and hold it over an object "
+                    "to toggle its selection (adds to the selection or removes it). "
+                    "Supports selecting multiple objects and deselecting.",
+    )
+    point_select_dwell: FloatProperty(
+        name="Selection Dwell", default=0.6, min=0.1, max=2.0,
+        subtype="TIME",
+        description="How long the index pointer must stay over an object "
+                    "before toggling its selection",
     )
 
     # -- display -----------------------------------------------------------
@@ -163,9 +294,19 @@ class HGC_Settings(PropertyGroup):
         name="Show Overlay", default=True,
         description="Master switch for everything drawn in the viewport",
     )
+    overlay_detail: EnumProperty(
+        name="Overlay Detail",
+        description="How much hand feedback to draw in the viewport",
+        items=(
+            ("FULL", "Full", "All joints, bones, labels and pick cues"),
+            ("MINIMAL", "Minimal", "Key joints, pick rings and status only"),
+        ),
+        default="FULL",
+        update=_overlay_detail_changed,
+    )
     show_skeleton: BoolProperty(
         name="Hand Skeleton", default=True,
-        description="Draw all 21 landmarks and the bones between them over "
+        description="Draw hand landmarks and the bones between them over "
                     "the viewport",
     )
     show_preview: BoolProperty(
@@ -231,19 +372,20 @@ SETTING_GROUPS = {
     "GESTURES": (
         "pinch_on", "pinch_off", "move_sensitivity", "use_depth",
         "depth_sensitivity", "rotate_sensitivity", "scale_sensitivity",
-        "use_two_hand", "two_hand_translate",
+        "use_two_hand", "two_hand_translate", "use_point_select",
+        "point_select_dwell",
     ),
     "DISPLAY": (
-        "show_overlay", "show_skeleton", "show_preview",
+        "show_overlay", "overlay_detail", "show_skeleton", "show_preview",
         "show_preview_landmarks", "show_landmark_indices",
         "show_hand_labels", "show_hud", "landmark_size", "bone_width",
         "overlay_opacity", "preview_size", "preview_margin",
         "preview_opacity", "preview_corner",
     ),
     "TRACKING": (
-        "camera_index", "camera_backend", "capture_width",
-        "capture_height", "num_hands", "mirror", "det_conf",
-        "presence_conf", "track_conf", "use_smoothing",
+        "camera_index", "camera_backend", "capture_preset",
+        "capture_width", "capture_height", "num_hands", "mirror",
+        "det_conf", "presence_conf", "track_conf", "use_smoothing",
         "smooth_min_cutoff", "smooth_beta", "update_rate",
     ),
 }

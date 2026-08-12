@@ -22,6 +22,8 @@ Landmark index reference (Google MediaPipe hand landmark model):
              (wrist)
 """
 
+import math
+
 # ---------------------------------------------------------------------------
 # Landmark identity
 # ---------------------------------------------------------------------------
@@ -77,6 +79,87 @@ FINGER_TIPS = (THUMB_TIP, INDEX_TIP, MIDDLE_TIP, RING_TIP, PINKY_TIP)
 #: Knuckle (MCP) indices, in thumb -> pinky order.
 FINGER_MCPS = (THUMB_MCP, INDEX_MCP, MIDDLE_MCP, RING_MCP, PINKY_MCP)
 
+#: Four-joint chains for the fingers used to recognise a pointing pose.
+FINGER_CHAINS = (
+    (INDEX_MCP, INDEX_PIP, INDEX_DIP, INDEX_TIP),
+    (MIDDLE_MCP, MIDDLE_PIP, MIDDLE_DIP, MIDDLE_TIP),
+    (RING_MCP, RING_PIP, RING_DIP, RING_TIP),
+    (PINKY_MCP, PINKY_PIP, PINKY_DIP, PINKY_TIP),
+)
+
+
+def _delta(a, b):
+    return (a[0] - b[0], a[1] - b[1], a[2] - b[2])
+
+
+def _dot(a, b):
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+
+
+def finger_is_extended(points, chain) -> bool:
+    """Return whether a finger is straight and reaches away from the wrist."""
+    mcp, pip, _dip, tip = chain
+    proximal = _delta(points[pip], points[mcp])
+    distal = _delta(points[tip], points[pip])
+    proximal_len = math.sqrt(_dot(proximal, proximal))
+    distal_len = math.sqrt(_dot(distal, distal))
+    if proximal_len < 1e-6 or distal_len < 1e-6:
+        return False
+
+    # A straight finger's base-to-PIP and PIP-to-tip vectors point in roughly
+    # the same direction. The reach check rejects a straight-looking finger
+    # folded sideways across the palm.
+    alignment = _dot(proximal, distal) / (proximal_len * distal_len)
+    wrist_to_pip = _delta(points[pip], points[WRIST])
+    wrist_to_tip = _delta(points[tip], points[WRIST])
+    pip_reach = math.sqrt(_dot(wrist_to_pip, wrist_to_pip))
+    tip_reach = math.sqrt(_dot(wrist_to_tip, wrist_to_tip))
+    return alignment >= 0.5 and tip_reach >= pip_reach * 1.15
+
+
+def is_pointing_pose(points) -> bool:
+    """
+    Recognise an index-led point, independent of hand rotation or scale.
+
+    Middle and ring must be folded. The pinky is ignored: MediaPipe often
+    reads it as slightly extended while tucked, which would otherwise cancel
+    selection.
+    """
+    if len(points) != NUM_LANDMARKS:
+        return False
+    index_ext = finger_is_extended(points, FINGER_CHAINS[0])
+    middle_ext = finger_is_extended(points, FINGER_CHAINS[1])
+    ring_ext = finger_is_extended(points, FINGER_CHAINS[2])
+    return index_ext and not middle_ext and not ring_ext
+
+
+#: Fingertips that close against the thumb in a full-hand pick / grab.
+PICK_TIPS = (INDEX_TIP, MIDDLE_TIP, RING_TIP, PINKY_TIP)
+
+
+def grab_allowed(points) -> bool:
+    """
+    Whether a full-hand pick may engage.
+
+    Pointing (index out, middle folded) blocks the grab so a rest thumb on
+    folded fingers cannot start a transform.
+    """
+    if len(points) != NUM_LANDMARKS:
+        return True
+    if is_pointing_pose(points):
+        return False
+    if (finger_is_extended(points, FINGER_CHAINS[0])
+            and not finger_is_extended(points, FINGER_CHAINS[1])):
+        return False
+    return True
+
+
+# Back-compat alias used by older call sites / tests.
+def allowed_pinch_tips(points) -> frozenset:
+    """Deprecated: grab is all-or-nothing; empty set means blocked."""
+    if grab_allowed(points):
+        return frozenset(PICK_TIPS)
+    return frozenset()
 # ---------------------------------------------------------------------------
 # Skeleton topology
 # ---------------------------------------------------------------------------

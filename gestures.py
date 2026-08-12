@@ -4,32 +4,31 @@ Gesture recognition and the transform engine that acts on it.
 
 Interaction model
 -----------------
-A pinch is a clutch: nothing moves until thumb and fingertip meet, and motion
-stops the instant they part. Which fingertip meets the thumb selects the
-channel, so the user never has to reach for the keyboard:
+A full-hand **pick** is the clutch: thumb plus index, middle, ring and pinky
+all gather together. Nothing moves until that grab closes, and motion stops
+the instant it opens.
 
 ======================  ==========================================
 Gesture                 Effect
 ======================  ==========================================
-Thumb + index           Grab and move in the view plane. Pushing
-                        the hand toward or away from the camera
-                        moves along the view axis.
-Thumb + middle          Rotate. The object copies the change in
-                        your hand's orientation, all three axes.
-Thumb + ring            Scale. Hand toward camera grows, away
-                        shrinks.
-Both hands, index       Two-handed transform: spread the hands to
-                        scale, twist to roll, move both together
-                        to translate.
+Pick (thumb + all       Move in the view plane. Push the hand
+ four fingertips)       toward / away from the camera for depth.
+                        Rotate the hand while holding to rotate
+                        the object on all three axes.
+Both hands picking      Scale: spread or close the hands. Optional
+                        twist (roll) and two-handed move.
+Index finger extended   Point and dwell to toggle selection.
 ======================  ==========================================
+
+There is no single-hand scale channel. Scaling always needs both hands.
 
 Two mechanisms keep this usable rather than twitchy:
 
-* **Hysteresis.** The pinch engages at a tighter threshold than it releases at,
+* **Hysteresis.** The pick engages at a tighter threshold than it releases at,
   so a hand hovering near the boundary does not chatter on and off.
 * **Relative deltas.** Every gesture records the pose of the hand *and* of the
   objects at the moment of engagement, then applies the difference. Absolute
-  mappings would make the object leap to the hand as soon as you pinched.
+  mappings would make the object leap to the hand as soon as you grabbed.
 """
 
 from __future__ import annotations
@@ -46,25 +45,22 @@ from . import landmarks as LM
 _AXIS_FLIP = Matrix.Diagonal((1.0, -1.0, -1.0))
 
 MODE_NONE = "NONE"
-MODE_MOVE = "MOVE"
-MODE_ROTATE = "ROTATE"
-MODE_SCALE = "SCALE"
-MODE_TWO_HAND = "TWO_HAND"
+MODE_GRAB = "GRAB"          # single-hand pick: move + rotate
+MODE_TWO_HAND = "TWO_HAND"  # both hands: scale (+ optional roll / translate)
+
+# Kept as aliases so older overlays / docs snippets do not hard-crash.
+MODE_MOVE = MODE_GRAB
+MODE_ROTATE = MODE_GRAB
+MODE_SCALE = MODE_TWO_HAND
 
 MODE_LABELS = {
     MODE_NONE: "Idle",
-    MODE_MOVE: "Move",
-    MODE_ROTATE: "Rotate",
-    MODE_SCALE: "Scale",
-    MODE_TWO_HAND: "Two-handed",
+    MODE_GRAB: "Move / Rotate",
+    MODE_TWO_HAND: "Scale",
 }
 
-#: Fingertip -> gesture channel.
-FINGER_TO_MODE = {
-    LM.INDEX_TIP: MODE_MOVE,
-    LM.MIDDLE_TIP: MODE_ROTATE,
-    LM.RING_TIP: MODE_SCALE,
-}
+#: After a pointing pose ends, wait this long before a pick may re-arm.
+_PINCH_REARM_SEC = 0.25
 
 
 # ---------------------------------------------------------------------------
@@ -90,6 +86,21 @@ def pinch_ratio(world_pts, tip_index: int) -> float:
     """Thumb-to-fingertip distance, normalised by hand size."""
     gap = (_v(world_pts[LM.THUMB_TIP]) - _v(world_pts[tip_index])).length
     return gap / hand_scale(world_pts)
+
+
+def pick_ratio(world_pts) -> float:
+    """
+    How closed a full-hand pick is (lower = tighter grab).
+
+    Mean of thumb-to-tip distance for index, middle, ring and pinky, so the
+    clutch only engages when the whole hand gathers toward the thumb — not a
+    single-finger pinch.
+    """
+    tips = LM.PICK_TIPS
+    total = 0.0
+    for tip in tips:
+        total += pinch_ratio(world_pts, tip)
+    return total / float(len(tips))
 
 
 def apparent_size(image_pts, aspect: float) -> float:
@@ -166,12 +177,12 @@ def to_region(point, region, mirror: bool = True) -> Vector:
 
 
 # ---------------------------------------------------------------------------
-# Per-hand pinch state
+# Per-hand pick / grab state
 # ---------------------------------------------------------------------------
 
 
 class PinchState:
-    """Hysteretic latch for one thumb-fingertip pair."""
+    """Hysteretic latch for a continuous ratio (pick closeness or a tip)."""
 
     __slots__ = ("engaged", "ratio")
 
@@ -192,29 +203,45 @@ class PinchState:
 
 
 class HandState:
-    """Tracks the pinch latches for one hand slot across frames."""
+    """Tracks the full-hand pick latch for one hand slot across frames."""
 
     def __init__(self):
-        self.pinches = {tip: PinchState() for tip in FINGER_TO_MODE}
+        self.grab = PinchState()
+        # Per-tip ratios for overlay feedback (not used as separate channels).
+        self.pinches = {tip: PinchState() for tip in LM.PICK_TIPS}
         self.present = False
 
-    def update(self, world_pts, on_threshold, off_threshold):
-        active = None
+    def update(self, world_pts, on_threshold, off_threshold,
+               allow_grab: bool = True) -> bool:
+        """
+        Advance the pick latch.
+
+        When ``allow_grab`` is False (pointing pose / re-arm cooldown), tip
+        ratios still update for the overlay but the grab is forced open.
+        """
         for tip, state in self.pinches.items():
-            if state.update(pinch_ratio(world_pts, tip),
-                            on_threshold, off_threshold) and active is None:
-                # Priority order matters when two fingers are near the thumb:
-                # index wins, then middle, then ring.
-                active = tip
-        # Enforce the priority explicitly rather than relying on dict order.
-        for tip in (LM.INDEX_TIP, LM.MIDDLE_TIP, LM.RING_TIP):
-            if self.pinches[tip].engaged:
-                return tip
-        return active
+            state.ratio = pinch_ratio(world_pts, tip)
+            # Tips no longer drive modes; keep them visually in sync with grab.
+            state.engaged = False
+
+        ratio = pick_ratio(world_pts)
+        if not allow_grab:
+            self.grab.ratio = ratio
+            self.grab.engaged = False
+            return False
+
+        engaged = self.grab.update(ratio, on_threshold, off_threshold)
+        if engaged:
+            for state in self.pinches.values():
+                state.engaged = True
+        return engaged
 
     def reset(self):
+        self.grab.engaged = False
+        self.grab.ratio = 1.0
         for state in self.pinches.values():
             state.engaged = False
+            state.ratio = 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -255,6 +282,14 @@ class GestureEngine:
         self.mode = MODE_NONE
         self.status = "Idle"
         self.last_error = ""
+        self.point_2d = None
+        self.pointed_object = None
+        self.point_progress = 0.0
+        self._point_candidate = None
+        self._point_started = 0.0
+        self._point_committed = None
+        # Per-slot monotonic time when transform pinches may engage again.
+        self._pinch_unlock_at = [0.0] * 4
 
     # -- public API --------------------------------------------------------
 
@@ -264,6 +299,8 @@ class GestureEngine:
         self.session = None
         self.mode = MODE_NONE
         self.status = "Idle"
+        self._pinch_unlock_at = [0.0] * 4
+        self._clear_pointing()
 
     def cancel(self):
         """Restore every object touched by the live gesture."""
@@ -291,9 +328,10 @@ class GestureEngine:
 
         on_threshold = settings.pinch_on
         off_threshold = max(settings.pinch_off, on_threshold + 0.02)
+        now = float(snapshot.timestamp)
 
-        # Which mode does each visible hand request this frame?
-        requests = []
+        # Which hands are actively picking this frame?
+        grabbing = []
         seen = set()
         for hand in snapshot.hands:
             if hand.slot >= len(self.hands):
@@ -301,23 +339,32 @@ class GestureEngine:
             seen.add(hand.slot)
             state = self.hands[hand.slot]
             state.present = True
-            tip = state.update(hand.world_pts, on_threshold, off_threshold)
-            if tip is not None:
-                requests.append((hand, tip))
+
+            allow = LM.grab_allowed(hand.world_pts)
+            if not allow:
+                self._pinch_unlock_at[hand.slot] = now + _PINCH_REARM_SEC
+            elif now < self._pinch_unlock_at[hand.slot]:
+                allow = False
+
+            if state.update(hand.world_pts, on_threshold, off_threshold,
+                            allow_grab=allow):
+                grabbing.append(hand)
 
         for slot, state in enumerate(self.hands):
             if slot not in seen:
                 state.present = False
                 state.reset()
+                if slot < len(self._pinch_unlock_at):
+                    self._pinch_unlock_at[slot] = 0.0
 
-        two_handed = (len(requests) == 2
-                      and all(tip == LM.INDEX_TIP for _, tip in requests)
-                      and settings.use_two_hand)
-
-        if two_handed:
+        use_two = getattr(settings, "use_two_hand", True)
+        if use_two and len(grabbing) >= 2:
             desired = MODE_TWO_HAND
-        elif requests:
-            desired = FINGER_TO_MODE.get(requests[0][1], MODE_NONE)
+            # Stable order by slot so scale distance does not flip hands.
+            grabbing = sorted(grabbing, key=lambda h: h.slot)[:2]
+        elif grabbing:
+            desired = MODE_GRAB
+            grabbing = grabbing[:1]
         else:
             desired = MODE_NONE
 
@@ -327,18 +374,43 @@ class GestureEngine:
 
         if desired == MODE_NONE:
             self.mode = MODE_NONE
-            self.status = "Open hand - no object held"
+            if getattr(settings, "use_point_select", True):
+                try:
+                    if self._update_point_selection(
+                            context, region, rv3d, snapshot, settings):
+                        return False
+                except Exception as exc:              # pragma: no cover
+                    self.last_error = str(exc)
+                    self.status = f"Point selection error: {exc}"
+                    self._clear_pointing()
+                    return False
+            else:
+                self._clear_pointing()
+            if not snapshot.hands:
+                self.status = "Show your hand to the camera"
+            elif not self._targets(context):
+                if getattr(settings, "use_point_select", True):
+                    self.status = "Point to select an object, or select one"
+                else:
+                    self.status = "Select an object to control"
+            else:
+                self.status = "Pick (all fingers) to move · two hands to scale"
             return False
+
+        self._clear_pointing()
 
         objects = self._targets(context)
         if not objects:
             self.mode = desired
-            self.status = "Nothing selected"
+            if getattr(settings, "use_point_select", True):
+                self.status = "Grabbing, but nothing selected — point to pick"
+            else:
+                self.status = "Grabbing, but nothing selected"
             return False
 
         if self.session is None:
             self.session = self._begin_session(context, region, rv3d, desired,
-                                               objects, requests, snapshot,
+                                               objects, grabbing, snapshot,
                                                settings, aspect)
             if self.session is None:
                 return False
@@ -346,19 +418,141 @@ class GestureEngine:
         self.mode = desired
         try:
             if desired == MODE_TWO_HAND:
-                return self._apply_two_hand(region, rv3d, requests, settings)
-            hand = requests[0][0]
-            if desired == MODE_MOVE:
-                return self._apply_move(region, rv3d, hand, settings, aspect)
-            if desired == MODE_ROTATE:
-                return self._apply_rotate(rv3d, hand, settings)
-            if desired == MODE_SCALE:
-                return self._apply_scale(hand, settings, aspect)
+                return self._apply_two_hand(region, rv3d, grabbing, settings)
+            return self._apply_grab(region, rv3d, grabbing[0], settings,
+                                    aspect)
         except Exception as exc:                  # pragma: no cover
             self.last_error = str(exc)
             self.status = f"Gesture error: {exc}"
             self.end_session()
         return False
+
+    # -- point selection --------------------------------------------------
+
+    def _clear_pointing(self):
+        self.point_2d = None
+        self.pointed_object = None
+        self.point_progress = 0.0
+        self._point_candidate = None
+        self._point_started = 0.0
+        self._point_committed = None
+
+    def _update_point_selection(self, context, region, rv3d, snapshot,
+                                settings) -> bool:
+        """Dwell the index pointer over an object to toggle its selection."""
+        pointing = [hand for hand in snapshot.hands
+                    if LM.is_pointing_pose(hand.world_pts)]
+        if len(pointing) != 1:
+            self._clear_pointing()
+            return False
+
+        hand = pointing[0]
+        self.point_2d = to_region(hand.image_pts[LM.INDEX_TIP], region,
+                                  mirror=settings.mirror)
+        if context.mode != "OBJECT":
+            self.pointed_object = None
+            self.point_progress = 0.0
+            self._point_candidate = None
+            self._point_committed = None
+            self.status = "Point selection requires Object Mode"
+            return True
+
+        candidate = self._raycast_object(context, region, rv3d, self.point_2d)
+        self.pointed_object = candidate
+        if candidate is None:
+            self.point_progress = 0.0
+            self._point_candidate = None
+            self._point_committed = None
+            self.status = "Point at a visible object"
+            return True
+
+        now = snapshot.timestamp
+        if candidate != self._point_candidate:
+            self._point_candidate = candidate
+            self._point_started = now
+            self._point_committed = None
+            self.point_progress = 0.0
+
+        if candidate == self._point_committed:
+            self.point_progress = 1.0
+            is_sel = candidate.select_get(view_layer=context.view_layer)
+            self.status = f"{'Selected' if is_sel else 'Deselected'}: {candidate.name}"
+            return True
+
+        dwell = max(float(getattr(settings, "point_select_dwell", 0.6)),
+                    0.05)
+        self.point_progress = max(
+            0.0, min((now - self._point_started) / dwell, 1.0))
+        if self.point_progress >= 1.0:
+            was_selected = candidate.select_get(view_layer=context.view_layer)
+            if self._toggle_object(context, candidate):
+                self._point_committed = candidate
+                verb = "Deselected" if was_selected else "Selected"
+                self.status = f"{verb}: {candidate.name}"
+            else:
+                self.status = f"Could not toggle {candidate.name}"
+            return True
+
+        percent = round(self.point_progress * 100.0)
+        self.status = f"Pointing at {candidate.name} - {percent}%"
+        return True
+
+    def _raycast_object(self, context, region, rv3d, coordinate):
+        """Return the selectable original object under a region coordinate."""
+        from bpy_extras import view3d_utils
+
+        origin = view3d_utils.region_2d_to_origin_3d(
+            region, rv3d, coordinate)
+        direction = view3d_utils.region_2d_to_vector_3d(
+            region, rv3d, coordinate)
+        if origin is None or direction is None or direction.length < 1e-6:
+            return None
+
+        depsgraph = context.evaluated_depsgraph_get()
+        hit, _location, _normal, _face, hit_object, _matrix = \
+            context.scene.ray_cast(depsgraph, origin, direction.normalized())
+        if not hit or hit_object is None:
+            return None
+
+        try:
+            original = hit_object.original
+        except (AttributeError, ReferenceError):
+            original = hit_object
+        obj = context.view_layer.objects.get(original.name)
+        if obj is None or obj.hide_select:
+            return None
+        try:
+            if not obj.visible_get(view_layer=context.view_layer):
+                return None
+        except (ReferenceError, TypeError):
+            return None
+        return obj
+
+    def _toggle_object(self, context, obj) -> bool:
+        """Toggle selection of obj (add if unselected, remove if selected).
+
+        When selecting, make it the active object. When deselecting the active
+        object, choose another remaining selected object as active if possible.
+        """
+        try:
+            currently = obj.select_get(view_layer=context.view_layer)
+            if currently:
+                # Deselect
+                obj.select_set(False, view_layer=context.view_layer)
+                if context.view_layer.objects.active == obj:
+                    remaining = [
+                        o for o in context.selected_objects
+                        if o != obj and o.select_get(view_layer=context.view_layer)
+                    ]
+                    context.view_layer.objects.active = remaining[0] if remaining else None
+                return True
+            else:
+                # Add to selection and make active
+                obj.select_set(True, view_layer=context.view_layer)
+                context.view_layer.objects.active = obj
+                return True
+        except (AttributeError, RuntimeError, ReferenceError):
+            return False
 
     # -- session management ------------------------------------------------
 
@@ -382,7 +576,7 @@ class GestureEngine:
             total += obj.matrix_world.translation
         return total / len(objects)
 
-    def _begin_session(self, context, region, rv3d, mode, objects, requests,
+    def _begin_session(self, context, region, rv3d, mode, objects, hands,
                        snapshot, settings, aspect):
         from bpy_extras import view3d_utils
 
@@ -397,17 +591,15 @@ class GestureEngine:
         session.pivot_2d = Vector(pivot_2d)
 
         if mode == MODE_TWO_HAND:
-            a, b = requests[0][0], requests[1][0]
-            pa = to_region(a.image_pts[LM.INDEX_TIP], region,
-                           mirror=settings.mirror)
-            pb = to_region(b.image_pts[LM.INDEX_TIP], region,
-                           mirror=settings.mirror)
+            a, b = hands[0], hands[1]
+            pa = self._hand_anchor_2d(a, region, settings)
+            pb = self._hand_anchor_2d(b, region, settings)
             delta = pb - pa
             session.two_hand_distance = max(delta.length, 1.0)
             session.two_hand_angle = math.atan2(delta.y, delta.x)
             session.two_hand_mid = (pa + pb) * 0.5
         else:
-            hand = requests[0][0]
+            hand = hands[0]
             cx, cy = palm_center(hand.image_pts)
             session.hand_2d = to_region((cx, cy, 0.0), region,
                                         mirror=settings.mirror)
@@ -416,6 +608,11 @@ class GestureEngine:
 
         self.status = f"{MODE_LABELS[mode]} - {len(objects)} object(s)"
         return session
+
+    def _hand_anchor_2d(self, hand, region, settings):
+        """Screen-space point used for two-hand distance / mid (palm centre)."""
+        cx, cy = palm_center(hand.image_pts)
+        return to_region((cx, cy, 0.0), region, mirror=settings.mirror)
 
     def end_session(self):
         """Close the live gesture and, if anything moved, make it undoable."""
@@ -452,7 +649,8 @@ class GestureEngine:
 
     # -- individual gestures ----------------------------------------------
 
-    def _apply_move(self, region, rv3d, hand, settings, aspect) -> bool:
+    def _grab_translation(self, region, rv3d, hand, settings, aspect):
+        """World-space translation from palm motion (+ optional depth)."""
         from bpy_extras import view3d_utils
 
         session = self.session
@@ -462,12 +660,12 @@ class GestureEngine:
         screen_delta = (now_2d - session.hand_2d) * settings.move_sensitivity
 
         target_2d = session.pivot_2d + screen_delta
-        # Unproject at the pivot's own depth so dragging tracks the cursor
+        # Unproject at the pivot's own depth so dragging tracks the hand
         # exactly, in perspective as well as orthographic views.
         new_pivot = view3d_utils.region_2d_to_location_3d(
             region, rv3d, target_2d, session.pivot)
         if new_pivot is None:
-            return False
+            return Vector((0.0, 0.0, 0.0))
         translation = new_pivot - session.pivot
 
         if settings.use_depth:
@@ -481,18 +679,23 @@ class GestureEngine:
                      .translation).length if rv3d.is_perspective else 10.0
             translation = translation + view_dir * (
                 amount * settings.depth_sensitivity * max(reach, 0.1))
+        return translation
 
-        return self._commit(Matrix.Translation(translation))
-
-    def _apply_rotate(self, rv3d, hand, settings) -> bool:
+    def _grab_rotation(self, rv3d, hand, settings):
+        """World-space rotation from the change in hand orientation."""
         session = self.session
         frame_now = hand_orientation(hand.world_pts)
         try:
+            # Delta that takes the start frame to the current frame.
             relative = frame_now @ session.hand_frame.inverted()
         except ValueError:
-            return False
+            return Matrix.Identity(4)
 
         quat = relative.to_quaternion()
+        # Invert so the object turns the same way the hand turns. Applying the
+        # raw frame delta maps the opposite sense onto the object.
+        quat.invert()
+
         if settings.rotate_sensitivity != 1.0:
             axis, angle = quat.to_axis_angle()
             quat = Quaternion(axis, angle * settings.rotate_sensitivity)
@@ -502,29 +705,47 @@ class GestureEngine:
         # turns the way the hand turns no matter where the viewport is orbited.
         view_rot = rv3d.view_rotation
         world_quat = view_rot @ quat @ view_rot.inverted()
-        return self._commit(world_quat.to_matrix().to_4x4())
+        return world_quat.to_matrix().to_4x4()
 
-    def _apply_scale(self, hand, settings, aspect) -> bool:
-        session = self.session
-        size_now = apparent_size(hand.image_pts, aspect)
-        ratio = size_now / max(session.hand_size, 1e-4)
-        factor = math.exp(math.log(max(ratio, 1e-3))
-                          * settings.scale_sensitivity)
-        factor = max(0.01, min(factor, 100.0))
-        return self._commit(Matrix.Diagonal(
-            (factor, factor, factor, 1.0)))
+    def _apply_grab(self, region, rv3d, hand, settings, aspect) -> bool:
+        """
+        Single-hand pick: move from palm translation, rotate from hand twist.
 
-    def _apply_two_hand(self, region, rv3d, requests, settings) -> bool:
+        Both channels share one clutch so a natural pick-and-turn feels like
+        holding the object.
+        """
+        translation = self._grab_translation(region, rv3d, hand, settings,
+                                             aspect)
+        rotation = self._grab_rotation(rv3d, hand, settings)
+        combined = Matrix.Translation(translation) @ rotation
+
+        # Status reflects which channel is doing useful work this frame.
+        rot_angle = rotation.to_quaternion().angle
+        moved = translation.length > 1e-5
+        if moved and rot_angle > 0.02:
+            label = "Move / Rotate"
+        elif rot_angle > 0.02:
+            label = "Rotate"
+        else:
+            label = "Move"
+        self.status = f"{label} - {len(self.session.objects)} object(s)"
+        return self._commit(combined)
+
+    def _apply_two_hand(self, region, rv3d, hands, settings) -> bool:
+        """Both hands picking: scale from separation (optional roll / move)."""
         session = self.session
-        a, b = requests[0][0], requests[1][0]
-        pa = to_region(a.image_pts[LM.INDEX_TIP], region,
-                       mirror=settings.mirror)
-        pb = to_region(b.image_pts[LM.INDEX_TIP], region,
-                       mirror=settings.mirror)
+        a, b = hands[0], hands[1]
+        pa = self._hand_anchor_2d(a, region, settings)
+        pb = self._hand_anchor_2d(b, region, settings)
         delta = pb - pa
 
         distance = max(delta.length, 1.0)
         factor = distance / session.two_hand_distance
+        # Two-hand scale reuses scale_sensitivity as a log-ish gain on the
+        # separation ratio so the same slider still feels right.
+        if settings.scale_sensitivity != 1.0:
+            factor = math.exp(math.log(max(factor, 1e-3))
+                              * settings.scale_sensitivity)
         factor = max(0.01, min(factor, 100.0))
 
         angle = math.atan2(delta.y, delta.x) - session.two_hand_angle
@@ -548,6 +769,7 @@ class GestureEngine:
                 combined = Matrix.Translation(
                     new_pivot - session.pivot) @ combined
 
+        self.status = f"Scale - {len(session.objects)} object(s)"
         return self._commit(combined)
 
     # -- reporting ---------------------------------------------------------
@@ -560,11 +782,7 @@ class GestureEngine:
             state = self.hands[hand.slot] if hand.slot < len(self.hands) \
                 else None
             tag = ""
-            if state is not None:
-                engaged = [name for name, tip in
-                           (("index", LM.INDEX_TIP), ("middle", LM.MIDDLE_TIP),
-                            ("ring", LM.RING_TIP))
-                           if state.pinches[tip].engaged]
-                tag = " +".join(engaged)
-            parts.append(f"{hand.handedness}{' [' + tag + ']' if tag else ''}")
+            if state is not None and state.grab.engaged:
+                tag = " pick"
+            parts.append(f"{hand.handedness}{tag}")
         return ", ".join(parts)

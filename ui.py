@@ -12,6 +12,14 @@ from . import deps, session, settings as settings_mod
 
 CATEGORY = "Gesture"
 
+# Compact gesture map shown on the main panel and in the Gestures section.
+_GESTURE_ROWS = (
+    ("Pick (thumb + all tips)", "Move", "VIEW_PAN"),
+    ("Pick + twist hand", "Rotate", "ORIENTATION_GIMBAL"),
+    ("Both hands picking", "Scale", "FULLSCREEN_ENTER"),
+    ("Point with index", "Toggle select", "RESTRICT_SELECT_OFF"),
+)
+
 
 def _draw_wrapped(layout, text, width=46, icon=None):
     """Draw readable multi-line copy in Blender's non-wrapping panel UI."""
@@ -21,6 +29,21 @@ def _draw_wrapped(layout, text, width=46, icon=None):
             layout.label(text=line, icon=icon)
         else:
             layout.label(text=line)
+
+
+def _draw_gesture_map(layout, title="How to control", show_hint=True):
+    """Shared pick → action cheat sheet."""
+    box = layout.box()
+    box.label(text=title, icon="HAND")
+    grid = box.grid_flow(row_major=True, columns=2, align=True)
+    for gesture, effect, icon in _GESTURE_ROWS:
+        grid.label(text=gesture)
+        grid.label(text=effect, icon=icon)
+    if show_hint:
+        hint = box.column(align=True)
+        hint.scale_y = 0.85
+        hint.label(text="Gather all fingertips to the thumb to grab.")
+        hint.label(text="Release to stop. Esc ends tracking.")
 
 
 def _reset_button(layout, group, text):
@@ -51,7 +74,9 @@ class HGC_PT_main(_Base, Panel):
             return
 
         running = session.is_running()
+        selected = len(context.selected_objects)
 
+        # ---- primary action --------------------------------------------
         row = layout.row()
         row.scale_y = 1.6
         if running:
@@ -59,6 +84,7 @@ class HGC_PT_main(_Base, Panel):
         else:
             row.operator("hgc.start", icon="PLAY", text="Start Tracking")
 
+        # ---- live status / pending restart -----------------------------
         if running:
             engine = session.engine()
             tracker = session.tracker()
@@ -67,12 +93,18 @@ class HGC_PT_main(_Base, Panel):
             if engine is not None:
                 col.label(text=engine.status, icon="HAND")
             if tracker is not None and tracker.fps:
-                col.label(text=f"{tracker.fps:.0f} fps from camera "
+                col.label(text=f"{tracker.fps:.0f} fps · camera "
                                f"{cfg.camera_index}", icon="CAMERA_DATA")
             if session.is_dirty():
-                col.label(text="Restart to apply camera changes",
-                          icon="INFO")
+                warn = box.column(align=True)
+                warn.alert = True
+                warn.label(text="Camera settings changed", icon="INFO")
+                restart = box.row()
+                restart.scale_y = 1.3
+                restart.operator("hgc.restart", icon="FILE_REFRESH",
+                                 text="Apply & Restart Tracking")
 
+        # ---- errors when stopped ---------------------------------------
         error = session.last_error()
         if error and not running:
             box = layout.box()
@@ -81,12 +113,37 @@ class HGC_PT_main(_Base, Panel):
             _draw_wrapped(box.column(align=True),
                           error.strip().splitlines()[-1], icon=None)
 
-        selected = len(context.selected_objects)
-        info = layout.row()
-        info.label(
-            text=f"{selected} object(s) selected" if selected
-            else "Select an object to control",
-            icon="OBJECT_DATA" if selected else "INFO")
+        # ---- selection guidance ----------------------------------------
+        info = layout.box()
+        if selected:
+            info.label(
+                text=(f"{selected} object selected" if selected == 1
+                      else f"{selected} objects selected"),
+                icon="OBJECT_DATA")
+            if not running:
+                tip = info.column(align=True)
+                tip.scale_y = 0.85
+                tip.label(text="Start tracking, then pick (all fingers) to move.")
+        else:
+            col = info.column(align=True)
+            col.label(text="No object selected", icon="INFO")
+            tip = info.column(align=True)
+            tip.scale_y = 0.85
+            if cfg.use_point_select:
+                tip.label(text="Select in the viewport, or start tracking")
+                tip.label(text="and point with your index finger to pick.")
+            else:
+                tip.label(text="Select an object in the viewport first.")
+
+        # ---- always-visible gesture map (first-run discoverability) ----
+        if not running:
+            _draw_gesture_map(layout, title="Gestures", show_hint=True)
+        else:
+            # Compact reminder while live — full map is one click away.
+            row = layout.row()
+            row.scale_y = 0.9
+            row.label(text="pick=move+rotate · two hands=scale",
+                      icon="HAND")
 
     def _draw_setup(self, layout, status):
         box = layout.box()
@@ -111,7 +168,7 @@ class HGC_PT_main(_Base, Panel):
             warn.alert = True
             warn.label(text="Blender's online access is disabled",
                        icon="INTERNET")
-            warn.label(text="Preferences > System > Network")
+            warn.label(text="Preferences → System → Network")
 
         actions = box.column(align=True)
         actions.scale_y = 1.3
@@ -119,11 +176,12 @@ class HGC_PT_main(_Base, Panel):
         if (not status["mediapipe"] or not status["cv2"]
                 or not status["numpy"]):
             actions.operator("hgc.install_dependencies",
-                             icon="IMPORT", text="Install Runtime Packages")
+                             icon="IMPORT", text="Install Dependencies")
         if not status["model"]:
             actions.operator("hgc.download_model", icon="URL",
                              text="Download Hand Model")
-        box.operator("hgc.refresh_status", icon="FILE_REFRESH")
+        box.operator("hgc.refresh_status", icon="FILE_REFRESH",
+                     text="Re-check")
 
         if status["errors"]:
             problems = box.column(align=True)
@@ -140,7 +198,7 @@ class HGC_PT_main(_Base, Panel):
 class HGC_PT_gestures(_Base, Panel):
     bl_label = "Gestures"
     bl_parent_id = "HGC_PT_main"
-    bl_options = {"DEFAULT_CLOSED"}
+    # Open by default so the mapping is easy to find while tuning.
 
     @classmethod
     def poll(cls, context):
@@ -152,27 +210,31 @@ class HGC_PT_gestures(_Base, Panel):
         layout.use_property_decorate = False
         cfg = settings_mod.get(context)
 
-        box = layout.box()
-        box.label(text="Pinch to control", icon="HAND")
-        grid = box.grid_flow(row_major=True, columns=2, align=True)
-        grid.label(text="Thumb + index")
-        grid.label(text="Move", icon="VIEW_PAN")
-        grid.label(text="Thumb + middle")
-        grid.label(text="Rotate", icon="ORIENTATION_GIMBAL")
-        grid.label(text="Thumb + ring")
-        grid.label(text="Scale", icon="FULLSCREEN_ENTER")
-        grid.label(text="Both index fingers")
-        grid.label(text="Scale + roll", icon="MOD_MIRROR")
+        _draw_gesture_map(layout, title="Gesture mapping", show_hint=False)
 
         col = layout.column(align=True)
+        col.prop(cfg, "use_point_select")
+        sub = col.row()
+        sub.enabled = cfg.use_point_select
+        sub.prop(cfg, "point_select_dwell")
+
+        box = layout.box()
+        box.label(text="Pick clutch", icon="OPTIONS")
+        col = box.column(align=True)
         col.prop(cfg, "pinch_on", slider=True)
         col.prop(cfg, "pinch_off", slider=True)
         if cfg.pinch_off <= cfg.pinch_on:
             warn = col.row()
             warn.alert = True
             warn.label(text="'Opens' must exceed 'Closes'", icon="ERROR")
+        tip = box.column(align=True)
+        tip.scale_y = 0.8
+        tip.label(text="Based on average thumb-to-tip distance for all")
+        tip.label(text="four fingers. Widen the gap to stop flicker.")
 
-        col = layout.column(align=True)
+        box = layout.box()
+        box.label(text="Sensitivity", icon="DRIVER")
+        col = box.column(align=True)
         col.prop(cfg, "move_sensitivity")
         col.prop(cfg, "rotate_sensitivity")
         col.prop(cfg, "scale_sensitivity")
@@ -212,6 +274,9 @@ class HGC_PT_display(_Base, Panel):
         layout.enabled = cfg.show_overlay
 
         col = layout.column(align=True)
+        col.prop(cfg, "overlay_detail", text="Detail")
+
+        col = layout.column(align=True)
         col.prop(cfg, "show_skeleton")
         sub = col.column(align=True)
         sub.enabled = cfg.show_skeleton
@@ -241,7 +306,7 @@ class HGC_PT_display(_Base, Panel):
         for name, hue in (("Palm / wrist", "white"), ("Thumb", "orange"),
                           ("Index", "yellow"), ("Middle", "green"),
                           ("Ring", "blue"), ("Pinky", "violet")):
-            col.label(text=f"{name} - {hue}")
+            col.label(text=f"{name} — {hue}")
 
         _reset_button(layout, "DISPLAY", "Reset Visual Settings")
 
@@ -264,31 +329,50 @@ class HGC_PT_camera(_Base, Panel):
 
         if running:
             note = layout.row()
-            note.label(text="Stop tracking to change camera settings",
+            note.label(text="Stop or Apply & Restart to change camera",
                        icon="LOCKED")
+            if session.is_dirty():
+                row = layout.row()
+                row.scale_y = 1.2
+                row.operator("hgc.restart", icon="FILE_REFRESH",
+                             text="Apply & Restart Tracking")
 
         col = layout.column(align=True)
         col.enabled = not running
-        col.prop(cfg, "camera_index")
+        col.prop(cfg, "camera_choice")
+        if cfg.camera_choice == "CUSTOM":
+            col.prop(cfg, "camera_index")
         col.prop(cfg, "camera_backend")
-        col.prop(cfg, "capture_width")
-        col.prop(cfg, "capture_height")
+        col.prop(cfg, "capture_preset")
+        if cfg.capture_preset == "CUSTOM":
+            col.prop(cfg, "capture_width")
+            col.prop(cfg, "capture_height")
         col.prop(cfg, "num_hands")
         col.prop(cfg, "mirror")
-        col.operator("hgc.probe_cameras", icon="ZOOM_ALL")
+
+        row = layout.row()
+        row.enabled = not running
+        row.operator("hgc.probe_cameras", icon="ZOOM_ALL")
 
         probe_message = session.camera_probe_message()
         if probe_message:
             probe = layout.box().column(align=True)
             _draw_wrapped(probe, probe_message, width=42, icon="CAMERA_DATA")
+        elif not session.camera_list() and not running:
+            tip = layout.column(align=True)
+            tip.scale_y = 0.85
+            tip.label(text="Tip: Detect Cameras if the wrong webcam opens.")
 
         box = layout.box()
-        box.label(text="Model confidence")
+        box.label(text="Model confidence", icon="SHADERFX")
         col = box.column(align=True)
         col.enabled = not running
         col.prop(cfg, "det_conf", slider=True)
         col.prop(cfg, "presence_conf", slider=True)
         col.prop(cfg, "track_conf", slider=True)
+        help_row = box.column(align=True)
+        help_row.scale_y = 0.8
+        help_row.label(text="Raise if phantom hands appear; lower if dropouts.")
 
         box = layout.box()
         box.prop(cfg, "use_smoothing")
@@ -296,6 +380,10 @@ class HGC_PT_camera(_Base, Panel):
         col.enabled = cfg.use_smoothing
         col.prop(cfg, "smooth_min_cutoff")
         col.prop(cfg, "smooth_beta")
+        help_row = box.column(align=True)
+        help_row.scale_y = 0.8
+        help_row.label(text="Still hand jitters → lower Steadiness.")
+        help_row.label(text="Laggy drags → raise Responsiveness.")
 
         row = layout.row()
         row.enabled = not running

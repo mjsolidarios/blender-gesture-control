@@ -35,23 +35,27 @@ add-on does not force you to download the dependencies again.
 
 ## Use
 
-1. Select one or more objects.
-2. Open the viewport sidebar (**N**) and choose the **Gesture** tab.
-3. Press **Start Tracking**.
-4. Press **Esc** in the viewport to stop.
+1. Open the viewport sidebar (**N**) and choose the **Gesture** tab.
+2. Select one or more objects, or start tracking and **point** with your
+   index finger to select objects.
+3. Press **Start Tracking**. The main panel shows the gesture map. A **pick**
+   (thumb gathering all four fingertips) is the clutch — nothing moves until
+   it closes.
+4. Press **Esc** in the viewport (or **Stop Tracking**) to stop.
+
+If you change camera settings while tracking, press **Apply & Restart
+Tracking** so they take effect.
 
 ### Gestures
 
-A pinch is a clutch: nothing moves until your thumb and fingertip meet, and
-motion stops the moment they part. Which fingertip you pinch with picks the
-channel.
-
 | Gesture | Effect |
 |---|---|
-| Thumb + **index** | Move in the view plane. Push your hand toward or away from the camera to move along the view axis. |
-| Thumb + **middle** | Rotate. The object copies your hand's change in orientation on all three axes. |
-| Thumb + **ring** | Scale. Hand toward the camera grows, away shrinks. |
-| **Both** index fingers | Two-handed: spread to scale, twist to roll, move both together to translate. |
+| **Pick** — thumb + index + middle + ring + pinky | Move in the view plane. Push toward or away from the camera for depth. |
+| **Pick + twist the hand** | Rotate. The object copies your hand's change in orientation on all three axes. |
+| **Both hands picking** | Scale: spread the hands to grow, close them to shrink. Optional twist (roll) and two-handed move. |
+| **Index extended**, other fingers folded | Point at an object and dwell to toggle its selection. Supports multi-object select / deselect. |
+
+There is **no single-hand scale** — scaling always needs both hands.
 
 Transforms apply to every selected object, pivoting on the active one. Each
 completed gesture is a single undo step.
@@ -69,12 +73,13 @@ the viewport, and inside the live camera preview.
   halo so it stays legible over light scenes.
 - **Bones** — all 21 connections of the MediaPipe hand topology, faded from the
   proximal to the distal joint so finger direction is readable at a glance.
-- **Pinch rings** — a yellow ring that tightens as thumb and fingertip
-  approach, turning solid green with a connecting line the instant the pinch
-  engages. This makes the threshold visible rather than something you have to
-  guess at.
+- **Pick rings** — a yellow ring on the palm that tightens as all fingertips
+  gather toward the thumb, turning solid green with lines to each tip when the
+  grab engages.
 - **Palm anchor** — the white ring marking the exact point that drives the move
   gesture.
+- **Pointing rings** — two rings follow the extended index fingertip, changing
+  from yellow to green as the object-selection dwell completes.
 - **Hold line** — while a gesture is live, a green line runs from your hand to
   the pivot of whatever you are holding.
 - **Landmark numbers** — optional 0–20 badges (**Visual Indicators >
@@ -91,26 +96,39 @@ quad-view or a second window will not show duplicate hands.
 
 **Gestures panel**
 
-- *Pinch Closes* / *Pinch Opens* — the hysteresis band, measured as
-  thumb-to-fingertip distance divided by hand size, so it is independent of how
-  far you sit from the camera. Keep "Opens" above "Closes"; widening the gap
-  stops the grip flickering, narrowing it makes the clutch feel snappier.
-- *Move / Rotate / Scale* — sensitivity multipliers.
+- *Point to Select* — extend the index and fold the other fingers to use the
+  fingertip as a viewport pointer (the pick grab is blocked while pointing).
+  Hold it over an object for *Selection Dwell* seconds; the pointer rings turn
+  green as the dwell completes. Available in Object Mode; toggles the object
+  under the pointer (add or remove), including multi-object select / deselect.
+- *Pick Closes* / *Pick Opens* — the hysteresis band for the full-hand pick,
+  measured as the average thumb-to-tip distance (index, middle, ring, pinky)
+  divided by hand size. Keep "Opens" above "Closes"; widening the gap stops
+  the grip flickering.
+- *Move / Rotate / Scale* — sensitivity multipliers (scale applies to
+  two-handed gestures only).
 
 **Camera & Tracking panel**
 
+- *Camera* — pick a device from the list (press **Detect Cameras** first if
+  the wrong webcam opens). Choose **Other index…** for a manual index.
+- *Resolution* — Fast / Default / Detail presets, or Custom width and height.
 - *Smooth Landmarks* — a One Euro filter. *Steadiness* (lower = smoother when
   still) and *Responsiveness* (higher = less lag when moving fast). If the
   overlay trembles while your hand is still, lower Steadiness; if dragging
   feels laggy, raise Responsiveness.
 - *Detection / Presence / Tracking* confidence — raise if phantom hands appear,
   lower if your hand drops out.
-- Camera settings apply when tracking restarts; the panel says so when a change
-  is pending.
-- Camera detection results stay visible in the panel, and each settings section
-  has a reset action for quickly returning to the recommended defaults.
+- Camera settings apply when tracking restarts. While tracking, pending
+  changes show **Apply & Restart Tracking**.
+- Each settings section has a reset action for recommended defaults.
 - Camera preview visibility and size can be adjusted while tracking. Mirror
   View keeps the preview, landmarks, and gesture direction in sync.
+
+**Visual Indicators panel**
+
+- *Overlay Detail* — **Full** draws the complete skeleton; **Minimal** keeps
+  key joints, pinch rings, and the status readout only.
 
 ---
 

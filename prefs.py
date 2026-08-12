@@ -71,7 +71,8 @@ class HGC_Preferences(AddonPreferences):
         install = row.operator("hgc.install_dependencies", icon="IMPORT",
                                text="Install Dependencies")
         install.upgrade = False
-        row.operator("hgc.download_model", icon="URL", text="Download Model")
+        row.operator("hgc.download_model", icon="URL",
+                     text="Download Hand Model")
 
         row = layout.row(align=True)
         upgrade = row.operator("hgc.install_dependencies", icon="FILE_REFRESH",
@@ -102,10 +103,11 @@ class HGC_Preferences(AddonPreferences):
         box.label(text="Usage", icon="HELP")
         col = box.column(align=True)
         col.scale_y = 0.8
-        col.label(text="1. Select one or more objects in the 3D viewport.")
-        col.label(text="2. Open the sidebar (N) and pick the Gesture tab.")
-        col.label(text="3. Press Start Tracking, then pinch to grab.")
-        col.label(text="   Thumb+index moves, +middle rotates, +ring scales.")
+        col.label(text="1. Open the 3D View sidebar (N) → Gesture tab.")
+        col.label(text="2. Press Start Tracking (select an object, or point")
+        col.label(text="   with your index finger to select one).")
+        col.label(text="3. Pick with thumb + all fingertips to move; twist")
+        col.label(text="   the hand to rotate. Both hands pick to scale.")
         col.label(text="4. Press Esc in the viewport to stop.")
 
 

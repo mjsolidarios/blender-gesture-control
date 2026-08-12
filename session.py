@@ -17,20 +17,34 @@ _engine = None
 _dirty = False
 _last_error = ""
 _camera_probe_message = ""
+# [(index, description), ...] from the last Detect Cameras run.
+_camera_list = []
+# Bumped whenever ownership of the live session changes so a superseded
+# modal operator can exit without tearing down the replacement session.
+_generation = 0
 
 
-def set_active(tracker, engine):
-    global _tracker, _engine, _dirty
+def set_active(tracker, engine) -> int:
+    """
+    Publish a live tracker/engine pair.
+
+    :returns: Generation token the owning modal must keep; when it no longer
+              matches :func:`generation`, that modal should exit quietly.
+    """
+    global _tracker, _engine, _dirty, _generation
     _tracker = tracker
     _engine = engine
     _dirty = False
+    _generation += 1
+    return _generation
 
 
 def clear():
-    global _tracker, _engine, _dirty
+    global _tracker, _engine, _dirty, _generation
     _tracker = None
     _engine = None
     _dirty = False
+    _generation += 1
 
 
 def tracker():
@@ -39,6 +53,10 @@ def tracker():
 
 def engine():
     return _engine
+
+
+def generation() -> int:
+    return _generation
 
 
 def is_running() -> bool:
@@ -73,9 +91,19 @@ def camera_probe_message() -> str:
     return _camera_probe_message
 
 
+def set_camera_list(items):
+    """Store cameras discovered by probe: list of (index, description)."""
+    global _camera_list
+    _camera_list = list(items or [])
+
+
+def camera_list():
+    return list(_camera_list)
+
+
 def shutdown():
     """Stop everything. Safe to call when nothing is running."""
-    global _tracker, _engine
+    global _tracker, _engine, _generation
     if _engine is not None:
         try:
             _engine.reset()
@@ -88,3 +116,4 @@ def shutdown():
             pass
     _tracker = None
     _engine = None
+    _generation += 1

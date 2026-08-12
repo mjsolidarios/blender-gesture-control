@@ -3,8 +3,8 @@
 Hand Gesture Control - drive Blender objects with your hands over a webcam.
 
 Uses Google MediaPipe Tasks Vision Hand Landmarker for 21-point hand tracking,
-draws every landmark as a viewport indicator, and maps pinch gestures onto
-object transforms.
+draws every landmark as a viewport indicator, and maps pick / two-hand
+gestures onto object transforms.
 
 The add-on imports cleanly whether or not MediaPipe is installed: heavy imports
 live inside :mod:`.tracker`, which is only touched once a session starts. That

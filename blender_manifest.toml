@@ -23,5 +23,6 @@ camera = "Capture webcam frames for hand tracking"
 paths_exclude_pattern = [
   "__pycache__/",
   "/.git/",
+  "/tests/",
   "*.zip",
 ]

@@ -27,7 +27,8 @@ import gpu
 from gpu_extras.batch import batch_for_shader
 
 from . import landmarks as LM
-from .gestures import MODE_LABELS, MODE_NONE, palm_center, to_region
+from .gestures import (MODE_GRAB, MODE_LABELS, MODE_NONE, MODE_TWO_HAND,
+                       palm_center, to_region)
 
 # ---------------------------------------------------------------------------
 # Shader helpers
@@ -326,6 +327,7 @@ class Overlay:
                 self._draw_hands(region, snapshot, settings)
             if snapshot is not None:
                 self._draw_pivot_link(context, region, snapshot, settings)
+                self._draw_point_pointer(region)
             if settings.show_hud:
                 self._draw_hud(region, snapshot, settings)
         finally:
@@ -414,6 +416,8 @@ class Overlay:
         if not snapshot.hands:
             return
 
+        minimal = (getattr(settings, "overlay_detail", "FULL") == "MINIMAL"
+                   and rect is None)
         joint_radius = settings.landmark_size * (scale if rect else 1.0)
         bone_width = settings.bone_width * (scale if rect else 1.0)
         alpha = settings.overlay_opacity if rect is None else 1.0
@@ -428,16 +432,19 @@ class Overlay:
             if self.engine is not None and hand.slot < len(self.engine.hands):
                 state = self.engine.hands[hand.slot]
 
-            # --- bones ---
-            for a, b in LM.HAND_CONNECTIONS:
-                ca = LM.landmark_color(b)   # colour the bone by its distal end
-                line_v.append(pts[a])
-                line_v.append(pts[b])
-                line_c.append((ca[0], ca[1], ca[2], 0.55 * alpha))
-                line_c.append((ca[0], ca[1], ca[2], 0.95 * alpha))
+            # --- bones (full skeleton only; minimal skips them for clarity) ---
+            if not minimal:
+                for a, b in LM.HAND_CONNECTIONS:
+                    ca = LM.landmark_color(b)   # distal-end colour
+                    line_v.append(pts[a])
+                    line_v.append(pts[b])
+                    line_c.append((ca[0], ca[1], ca[2], 0.55 * alpha))
+                    line_c.append((ca[0], ca[1], ca[2], 0.95 * alpha))
 
-            # --- joints: all 21, every frame ---
-            for index in range(LM.NUM_LANDMARKS):
+            # --- joints: all 21, or just the ones gestures care about ---
+            joint_iter = (sorted(LM.KEY_LANDMARKS) if minimal
+                          else range(LM.NUM_LANDMARKS))
+            for index in joint_iter:
                 colour = LM.landmark_color(index)
                 radius = joint_radius * (1.45 if index in LM.KEY_LANDMARKS
                                          else 1.0)
@@ -447,30 +454,35 @@ class Overlay:
                 _append_disc(tris_v, tris_c, pts[index], radius,
                              (colour[0], colour[1], colour[2], 0.98 * alpha))
 
-            # --- pinch indicators ---
+            # --- full-hand pick indicator (thumb gathers all four tips) ---
             if state is not None:
-                for tip, pinch in state.pinches.items():
-                    thumb = pts[LM.THUMB_TIP]
-                    other = pts[tip]
-                    mid = ((thumb[0] + other[0]) * 0.5,
-                           (thumb[1] + other[1]) * 0.5)
-                    if pinch.engaged:
-                        colour = (0.25, 1.0, 0.55)
-                        _append_ring(tris_v, tris_c, mid,
-                                     joint_radius * 2.8, 2.5 * scale,
-                                     (colour[0], colour[1], colour[2],
-                                      0.95 * alpha))
+                thumb = pts[LM.THUMB_TIP]
+                grab = state.grab
+                if grab.engaged:
+                    colour = (0.25, 1.0, 0.55)
+                    for tip in LM.PICK_TIPS:
+                        other = pts[tip]
                         line_v.extend((thumb, other))
-                        line_c.extend(((*colour, 0.95 * alpha),) * 2)
-                    elif pinch.ratio < settings.pinch_off * 1.6:
-                        # Proximity cue: the ring tightens as the pinch nears.
-                        t = max(0.0, min(1.0,
-                                (settings.pinch_off * 1.6 - pinch.ratio)
-                                / max(settings.pinch_off * 1.2, 1e-3)))
-                        _append_ring(tris_v, tris_c, mid,
-                                     joint_radius * (1.6 + 1.6 * t),
-                                     1.5 * scale,
-                                     (1.0, 0.85, 0.3, 0.15 + 0.6 * t * alpha))
+                        line_c.extend(((*colour, 0.9 * alpha),) * 2)
+                    cx, cy = palm_center(hand.image_pts)
+                    anchor = self._map((cx, cy, 0.0), region, rect, scale,
+                                       settings.mirror)
+                    _append_ring(tris_v, tris_c, anchor,
+                                 joint_radius * 3.2, 2.8 * scale,
+                                 (colour[0], colour[1], colour[2],
+                                  0.95 * alpha))
+                elif grab.ratio < settings.pinch_off * 1.6:
+                    # Proximity: ring tightens as the whole hand gathers.
+                    t = max(0.0, min(1.0,
+                            (settings.pinch_off * 1.6 - grab.ratio)
+                            / max(settings.pinch_off * 1.2, 1e-3)))
+                    cx, cy = palm_center(hand.image_pts)
+                    anchor = self._map((cx, cy, 0.0), region, rect, scale,
+                                       settings.mirror)
+                    _append_ring(tris_v, tris_c, anchor,
+                                 joint_radius * (1.8 + 1.8 * t),
+                                 1.6 * scale,
+                                 (1.0, 0.85, 0.3, 0.15 + 0.6 * t * alpha))
 
             # --- palm anchor: the point the move gesture actually follows ---
             cx, cy = palm_center(hand.image_pts)
@@ -482,11 +494,33 @@ class Overlay:
         _draw_lines(line_v, line_c, max(bone_width, 0.5), region)
         _draw_tris(tris_v, tris_c)
 
-        if labels and settings.show_landmark_indices:
+        if labels and settings.show_landmark_indices and not minimal:
             self._draw_indices(region, snapshot, settings, rect, scale, alpha)
-        if labels and settings.show_hand_labels:
+        if labels and settings.show_hand_labels and not minimal:
             self._draw_hand_labels(region, snapshot, settings, rect, scale,
                                    alpha)
+
+    def _draw_point_pointer(self, region):
+        """Show ray-cast feedback and dwell progress around the index tip."""
+        engine = self.engine
+        if engine is None or engine.point_2d is None:
+            return
+
+        progress = max(0.0, min(float(engine.point_progress), 1.0))
+        if engine.pointed_object is None:
+            colour = (0.75, 0.78, 0.85, 0.75)
+        else:
+            colour = (1.0 - 0.65 * progress,
+                      0.72 + 0.28 * progress,
+                      0.18 + 0.35 * progress,
+                      0.95)
+
+        verts, colors = [], []
+        _append_ring(verts, colors, engine.point_2d, 12.0, 2.5, colour)
+        if engine.pointed_object is not None:
+            _append_ring(verts, colors, engine.point_2d,
+                         17.0 - 4.0 * progress, 1.5, colour)
+        _draw_tris(verts, colors)
 
     def _draw_indices(self, region, snapshot, settings, rect, scale, alpha):
         font = 0
@@ -557,25 +591,38 @@ class Overlay:
         if self.engine is not None:
             mode = self.engine.mode
         active = mode != MODE_NONE
+        minimal = getattr(settings, "overlay_detail", "FULL") == "MINIMAL"
+
+        # Colour the mode title by channel.
+        if mode == MODE_GRAB:
+            title_color = (0.35, 1.0, 0.55, 1.0)
+        elif mode == MODE_TWO_HAND:
+            title_color = (0.75, 0.55, 1.0, 1.0)
+        elif active:
+            title_color = (0.35, 1.0, 0.6, 1.0)
+        else:
+            title_color = (0.85, 0.88, 0.95, 0.95)
 
         # Lines are listed top-to-bottom, then drawn bottom-up.
         lines = [
-            (15.0, (0.35, 1.0, 0.6, 1.0) if active
-             else (0.85, 0.88, 0.95, 0.95),
-             f"Hand Gesture Control - {MODE_LABELS.get(mode, mode)}"),
+            (15.0, title_color,
+             f"Gesture · {MODE_LABELS.get(mode, mode)}"),
             (12.0, (0.78, 0.80, 0.86, 0.9),
-             self.status_text or "waiting for camera"),
+             self.status_text or "Show your hand to the camera"),
         ]
-        if snapshot is not None and snapshot.hands:
+        if snapshot is not None and snapshot.hands and not minimal:
             hands = ", ".join(h.handedness for h in snapshot.hands)
             lines.append((12.0, (0.65, 0.70, 0.80, 0.85),
                           f"{len(snapshot.hands)} hand(s): {hands}"))
         if self.error_text:
             lines.append((12.0, (1.0, 0.45, 0.4, 0.95), self.error_text[:110]))
-        lines.append((11.0, (0.55, 0.58, 0.66, 0.8),
-                      "pinch  index=move  middle=rotate  ring=scale  "
-                      "two hands=scale+roll   Esc to stop"))
-
+        if minimal:
+            lines.append((11.0, (0.55, 0.58, 0.66, 0.8),
+                          "pick=move+rotate  two hands=scale   Esc"))
+        else:
+            lines.append((11.0, (0.55, 0.58, 0.66, 0.8),
+                          "point=select  pick(all fingers)=move+rotate  "
+                          "two hands=scale   Esc"))
         # Step over the camera preview if it occupies this corner.
         base = pad
         if settings.show_preview and settings.preview_corner == "BOTTOM_LEFT":

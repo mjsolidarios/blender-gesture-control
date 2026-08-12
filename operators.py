@@ -144,17 +144,22 @@ class HGC_OT_probe_cameras(Operator):
             return {"CANCELLED"}
         found = probe_cameras()
         if not found:
+            session.set_camera_list([])
             session.set_camera_probe_message(
                 "No cameras found. Close other camera apps and try again.")
             self.report({"WARNING"}, "No cameras responded")
             return {"CANCELLED"}
 
+        session.set_camera_list(found)
         cfg = settings_mod.get(context)
         indices = {index for index, _ in found}
         selected = ""
         if cfg.camera_index not in indices:
             cfg.camera_index = found[0][0]
             selected = f" Selected camera {cfg.camera_index}."
+        else:
+            # Refresh the picker label even when the index is unchanged.
+            cfg.camera_index = cfg.camera_index
         message = "Found " + ", ".join(desc for _, desc in found) + selected
         session.set_camera_probe_message(message)
         self.report({"INFO"}, message)
@@ -193,37 +198,66 @@ class HGC_OT_reset_settings(Operator):
 # ---------------------------------------------------------------------------
 
 
+def _stop_tracking():
+    """Tear down the live session without requiring an operator instance."""
+    engine = session.engine()
+    if engine is not None:
+        try:
+            engine.end_session()
+        except Exception:
+            pass
+    session.shutdown()
+    overlay.disable()
+    overlay.tag_redraw()
+
+
 class HGC_OT_stop(Operator):
     bl_idname = "hgc.stop"
     bl_label = "Stop Hand Tracking"
     bl_description = "Release the camera and remove the viewport overlay"
 
     def execute(self, context):
-        engine = session.engine()
-        if engine is not None:
-            engine.end_session()
-        session.shutdown()
-        overlay.disable()
-        overlay.tag_redraw()
+        _stop_tracking()
         self.report({"INFO"}, "Hand tracking stopped")
         return {"FINISHED"}
+
+
+class HGC_OT_restart(Operator):
+    bl_idname = "hgc.restart"
+    bl_label = "Restart Tracking"
+    bl_description = ("Stop and start tracking again so pending camera "
+                      "settings take effect")
+
+    @classmethod
+    def poll(cls, context):
+        return (context.area is not None
+                and context.area.type == "VIEW_3D"
+                and session.is_running())
+
+    def execute(self, context):
+        _stop_tracking()
+        # invoke() on start runs the full camera setup path.
+        return bpy.ops.hgc.start("INVOKE_DEFAULT")
 
 
 class HGC_OT_start(Operator):
     bl_idname = "hgc.start"
     bl_label = "Start Hand Tracking"
-    bl_description = ("Open the camera and begin controlling selected objects "
-                      "with hand gestures. Press Esc in the viewport to stop")
+    bl_description = ("Open the camera and begin controlling objects with "
+                      "hand gestures. Pinch to grab; Esc stops")
 
     _timer = None
     _area = None
     _smooth_image = None
     _smooth_world = None
     _last_frame_id = -1
+    _generation = 0
 
     @classmethod
     def poll(cls, context):
-        return context.area is not None and context.area.type == "VIEW_3D"
+        return (context.area is not None
+                and context.area.type == "VIEW_3D"
+                and not session.is_running())
 
     # -- setup -------------------------------------------------------------
 
@@ -236,13 +270,13 @@ class HGC_OT_start(Operator):
         if (not status["mediapipe"] or not status["cv2"]
                 or not status["numpy"]):
             self.report({"ERROR"},
-                        "A runtime package is missing. Use 'Install "
-                        "Dependencies' in the add-on preferences")
+                        "A runtime package is missing. Use Install "
+                        "Dependencies in this panel or in Preferences")
             return {"CANCELLED"}
         if not status["model"]:
             self.report({"ERROR"},
-                        "hand_landmarker.task is missing. Use 'Download "
-                        "Model' in the add-on preferences")
+                        "Hand model is missing. Use Download Hand Model in "
+                        "this panel or in Preferences")
             return {"CANCELLED"}
 
         cfg = settings_mod.get(context)
@@ -269,7 +303,7 @@ class HGC_OT_start(Operator):
             return {"CANCELLED"}
 
         engine = GestureEngine()
-        session.set_active(tracker, engine)
+        self._generation = session.set_active(tracker, engine)
         session.set_error("")
 
         self._smooth_image = LandmarkSmoother(num_hands=4)
@@ -281,7 +315,7 @@ class HGC_OT_start(Operator):
         overlay.settings = cfg
         overlay.target_area = context.area
         overlay.error_text = ""
-        overlay.status_text = "starting"
+        overlay.status_text = "Show your hand to the camera"
         overlay.enable()
 
         wm = context.window_manager
@@ -289,12 +323,17 @@ class HGC_OT_start(Operator):
                                          window=context.window)
         wm.modal_handler_add(self)
         overlay.tag_redraw()
-        self.report({"INFO"}, "Hand tracking started - press Esc to stop")
+        self.report({"INFO"}, "Hand tracking started — press Esc to stop")
         return {"RUNNING_MODAL"}
 
     # -- loop --------------------------------------------------------------
 
     def modal(self, context, event):
+        # A panel Stop/Restart (or a newer Start) may have superseded us.
+        if session.generation() != self._generation:
+            self._release_timer(context)
+            return {"CANCELLED"}
+
         if event.type in {"ESC"} and event.value == "PRESS":
             self._finish(context)
             return {"CANCELLED"}
@@ -393,7 +432,7 @@ class HGC_OT_start(Operator):
 
     # -- teardown ----------------------------------------------------------
 
-    def _finish(self, context):
+    def _release_timer(self, context):
         wm = context.window_manager
         if self._timer is not None:
             try:
@@ -401,12 +440,12 @@ class HGC_OT_start(Operator):
             except Exception:
                 pass
             self._timer = None
-        engine = session.engine()
-        if engine is not None:
-            engine.end_session()
-        session.shutdown()
-        overlay.disable()
-        overlay.tag_redraw()
+
+    def _finish(self, context):
+        self._release_timer(context)
+        # Only tear the session down if we still own it.
+        if session.generation() == self._generation:
+            _stop_tracking()
 
     def cancel(self, context):
         self._finish(context)
@@ -435,6 +474,7 @@ classes = (
     HGC_OT_reset_settings,
     HGC_OT_start,
     HGC_OT_stop,
+    HGC_OT_restart,
 )
 
 
