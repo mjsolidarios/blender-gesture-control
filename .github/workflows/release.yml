@@ -1,0 +1,90 @@
+name: Build and Release Blender Extension
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Build only (no GitHub release)'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Blender runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libxxf86vm-dev libxfixes3 libxi-dev libxkbcommon-x11-0 \
+            libgl1-mesa-glx libgl1
+
+      - name: Download and setup Blender (4.2 series)
+        run: |
+          # Pin a specific 4.2 release for reproducible builds.
+          # Update this when you want to build against a newer patch.
+          BLENDER_VERSION="4.2.10"
+          ARCHIVE="blender-${BLENDER_VERSION}-linux-x64.tar.xz"
+          URL="https://download.blender.org/release/Blender4.2/${ARCHIVE}"
+
+          echo "Downloading $URL"
+          curl -fL --retry 3 -o "$ARCHIVE" "$URL"
+          tar -xf "$ARCHIVE"
+          BLENDER_DIR="$(pwd)/blender-${BLENDER_VERSION}-linux-x64"
+          echo "$BLENDER_DIR" >> $GITHUB_PATH
+          echo "BLENDER_DIR=$BLENDER_DIR" >> $GITHUB_ENV
+
+      - name: Verify Blender
+        run: |
+          blender --version
+          blender --command extension --help >/dev/null
+
+      - name: Read version from manifest
+        id: manifest
+        run: |
+          VERSION=$(grep -E '^version\s*=' blender_manifest.toml | head -n1 | sed -E 's/.*"([^"]+)".*/\1/')
+          ID=$(grep -E '^id\s*=' blender_manifest.toml | head -n1 | sed -E 's/.*"([^"]+)".*/\1/')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "id=$ID" >> $GITHUB_OUTPUT
+          echo "Expected zip: ${ID}-${VERSION}.zip"
+
+      - name: Syntax check (no Blender required)
+        run: python3 -m compileall -q .
+
+      - name: Build extension
+        run: |
+          blender --command extension build --source-dir .
+          ls -lh *.zip
+
+      - name: Validate the built package
+        run: |
+          ZIP="${{ steps.manifest.outputs.id }}-${{ steps.manifest.outputs.version }}.zip"
+          blender --command extension validate "$ZIP"
+
+      - name: Upload build artifact (always)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.manifest.outputs.id }}-${{ steps.manifest.outputs.version }}-${{ github.sha }}
+          path: '*.zip'
+          retention-days: 30
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/') && (github.event.inputs.dry_run == false || github.event.inputs.dry_run == null || github.event.inputs.dry_run == '')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Hand Gesture Control v${{ steps.manifest.outputs.version }}"
+          files: ${{ steps.manifest.outputs.id }}-${{ steps.manifest.outputs.version }}.zip
+          generate_release_notes: true
+          draft: false
+          prerelease: false
