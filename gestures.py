@@ -265,6 +265,8 @@ class GrabSession:
         self.two_hand_distance = 1.0
         self.two_hand_angle = 0.0
         self.two_hand_mid = None
+        self.dead_zone_cleared = False
+        self.engage_hand_2d = None
         self.changed = False
 
 
@@ -288,8 +290,13 @@ class GestureEngine:
         self._point_candidate = None
         self._point_started = 0.0
         self._point_committed = None
+        self._tap_was_pointing = False
         # Per-slot monotonic time when transform pinches may engage again.
         self._pinch_unlock_at = [0.0] * 4
+        self._sticky_locked = [False] * 4
+        self._sticky_was_engaged = [False] * 4
+        self._last_hand_seen = 0.0
+        self._grace_snapshot = None
 
     # -- public API --------------------------------------------------------
 
@@ -300,6 +307,11 @@ class GestureEngine:
         self.mode = MODE_NONE
         self.status = "Idle"
         self._pinch_unlock_at = [0.0] * 4
+        self._sticky_locked = [False] * 4
+        self._sticky_was_engaged = [False] * 4
+        self._last_hand_seen = 0.0
+        self._grace_snapshot = None
+        self._tap_was_pointing = False
         self._clear_pointing()
 
     def cancel(self):
@@ -326,6 +338,23 @@ class GestureEngine:
         aspect = (snapshot.width / snapshot.height) if snapshot.height else \
             (region.width / max(region.height, 1))
 
+        # Hand-loss grace period: hold state briefly when hand disappears.
+        grace = getattr(settings, "hand_loss_grace", 0.0)
+        if snapshot.hands:
+            self._last_hand_seen = float(snapshot.timestamp)
+            self._grace_snapshot = None
+        elif (grace > 0 and self.session is not None
+              and float(snapshot.timestamp) - self._last_hand_seen < grace):
+            # Within grace period: pretend last hands are still there.
+            if self._grace_snapshot is not None:
+                snapshot = self._grace_snapshot
+            self.status = "Hand lost — holding position..."
+        else:
+            self._grace_snapshot = None
+
+        if snapshot.hands:
+            self._grace_snapshot = snapshot
+
         on_threshold = settings.pinch_on
         off_threshold = max(settings.pinch_off, on_threshold + 0.02)
         now = float(snapshot.timestamp)
@@ -350,12 +379,36 @@ class GestureEngine:
                             allow_grab=allow):
                 grabbing.append(hand)
 
+        # Sticky pick: toggle grab lock on quick pick-and-release.
+        if getattr(settings, "use_sticky_pick", False):
+            for hand in snapshot.hands:
+                if hand.slot >= len(self.hands):
+                    continue
+                state = self.hands[hand.slot]
+                engaged = state.grab.engaged
+                was = self._sticky_was_engaged[hand.slot]
+
+                if was and not engaged:
+                    self._sticky_locked[hand.slot] = \
+                        not self._sticky_locked[hand.slot]
+
+                self._sticky_was_engaged[hand.slot] = engaged
+
+                if self._sticky_locked[hand.slot] and not engaged:
+                    if hand not in grabbing:
+                        grabbing.append(hand)
+        else:
+            self._sticky_locked = [False] * 4
+            self._sticky_was_engaged = [False] * 4
+
         for slot, state in enumerate(self.hands):
             if slot not in seen:
                 state.present = False
                 state.reset()
                 if slot < len(self._pinch_unlock_at):
                     self._pinch_unlock_at[slot] = 0.0
+                if slot < len(self._sticky_was_engaged):
+                    self._sticky_was_engaged[slot] = False
 
         use_two = getattr(settings, "use_two_hand", True)
         if use_two and len(grabbing) >= 2:
@@ -436,12 +489,33 @@ class GestureEngine:
         self._point_candidate = None
         self._point_started = 0.0
         self._point_committed = None
+        self._tap_was_pointing = False
 
     def _update_point_selection(self, context, region, rv3d, snapshot,
                                 settings) -> bool:
         """Dwell the index pointer over an object to toggle its selection."""
         pointing = [hand for hand in snapshot.hands
                     if LM.is_pointing_pose(hand.world_pts)]
+        # Tap-to-select: detect finger curl while pointing.
+        if getattr(settings, "use_tap_select", False):
+            was_pointing = self._tap_was_pointing
+            is_pointing_now = len(pointing) == 1
+            self._tap_was_pointing = is_pointing_now
+            if was_pointing and not is_pointing_now \
+                    and self._point_candidate is not None:
+                obj = self._point_candidate
+                if context.mode == "OBJECT":
+                    try:
+                        was_selected = obj.select_get(
+                            view_layer=context.view_layer)
+                        if self._toggle_object(context, obj):
+                            verb = "Deselected" if was_selected else "Selected"
+                            self.status = f"Tap {verb}: {obj.name}"
+                            self._point_committed = obj
+                            self.point_progress = 1.0
+                            return True
+                    except (ReferenceError, AttributeError):
+                        pass
         if len(pointing) != 1:
             self._clear_pointing()
             return False
@@ -458,6 +532,13 @@ class GestureEngine:
             return True
 
         candidate = self._raycast_object(context, region, rv3d, self.point_2d)
+
+        # Snap-to-nearest: if direct raycast misses, search nearby.
+        if candidate is None and getattr(settings, "use_snap_select", False):
+            snap_radius = getattr(settings, "snap_select_radius", 30.0)
+            candidate = self._snap_nearest(context, region, rv3d,
+                                           self.point_2d, snap_radius)
+
         self.pointed_object = candidate
         if candidate is None:
             self.point_progress = 0.0
@@ -527,6 +608,20 @@ class GestureEngine:
         except (ReferenceError, TypeError):
             return None
         return obj
+
+    def _snap_nearest(self, context, region, rv3d, coordinate, radius):
+        """Try raycasting in a small spiral around the pointer."""
+        from mathutils import Vector as Vec
+        offsets = [(radius * 0.5, 0), (-radius * 0.5, 0),
+                   (0, radius * 0.5), (0, -radius * 0.5),
+                   (radius, 0), (-radius, 0),
+                   (0, radius), (0, -radius)]
+        for dx, dy in offsets:
+            test = Vec((coordinate.x + dx, coordinate.y + dy))
+            obj = self._raycast_object(context, region, rv3d, test)
+            if obj is not None:
+                return obj
+        return None
 
     def _toggle_object(self, context, obj) -> bool:
         """Toggle selection of obj (add if unselected, remove if selected).
@@ -606,6 +701,14 @@ class GestureEngine:
             session.hand_size = apparent_size(hand.image_pts, aspect)
             session.hand_frame = hand_orientation(hand.world_pts)
 
+        # Record the engage position for dead zone.
+        if mode == MODE_GRAB:
+            session.engage_hand_2d = session.hand_2d.copy() \
+                if session.hand_2d else None
+        elif mode == MODE_TWO_HAND:
+            session.engage_hand_2d = session.two_hand_mid.copy() \
+                if session.two_hand_mid else None
+
         self.status = f"{MODE_LABELS[mode]} - {len(objects)} object(s)"
         return session
 
@@ -658,6 +761,14 @@ class GestureEngine:
         now_2d = to_region((cx, cy, 0.0), region,
                            mirror=settings.mirror)
         screen_delta = (now_2d - session.hand_2d) * settings.move_sensitivity
+        # Velocity curve: non-linear mapping for precision at low speed.
+        if getattr(settings, "use_velocity_curve", False):
+            speed = screen_delta.length
+            if speed > 0:
+                # Quadratic-ish curve: small motions are attenuated, large
+                # amplified.
+                factor = min(speed / 50.0, 1.0) ** 0.5 + 0.3
+                screen_delta = screen_delta * factor
 
         target_2d = session.pivot_2d + screen_delta
         # Unproject at the pivot's own depth so dragging tracks the hand
@@ -714,6 +825,26 @@ class GestureEngine:
         Both channels share one clutch so a natural pick-and-turn feels like
         holding the object.
         """
+        session = self.session
+        # Dead zone: discard the initial jittery frames after grab engages.
+        dead_zone = getattr(settings, "dead_zone", 0.0)
+        if dead_zone > 0 and not session.dead_zone_cleared:
+            cx, cy = palm_center(hand.image_pts)
+            now_2d = to_region((cx, cy, 0.0), region, mirror=settings.mirror)
+            if session.engage_hand_2d is not None:
+                delta = (now_2d - session.engage_hand_2d).length
+                normalised = delta / max(region.width, 1)
+                if normalised < dead_zone:
+                    self.status = \
+                        f"Move (dead zone) - {len(session.objects)} object(s)"
+                    return False
+            session.dead_zone_cleared = True
+            # Re-anchor from current position so the object doesn't jump.
+            cx2, cy2 = palm_center(hand.image_pts)
+            session.hand_2d = to_region((cx2, cy2, 0.0), region,
+                                        mirror=settings.mirror)
+            session.hand_size = apparent_size(hand.image_pts, aspect)
+            session.hand_frame = hand_orientation(hand.world_pts)
         translation = self._grab_translation(region, rv3d, hand, settings,
                                              aspect)
         rotation = self._grab_rotation(rv3d, hand, settings)
@@ -734,6 +865,24 @@ class GestureEngine:
     def _apply_two_hand(self, region, rv3d, hands, settings) -> bool:
         """Both hands picking: scale from separation (optional roll / move)."""
         session = self.session
+        dead_zone = getattr(settings, "dead_zone", 0.0)
+        if dead_zone > 0 and not session.dead_zone_cleared:
+            a, b = hands[0], hands[1]
+            pa = self._hand_anchor_2d(a, region, settings)
+            pb = self._hand_anchor_2d(b, region, settings)
+            mid_now = (pa + pb) * 0.5
+            if session.engage_hand_2d is not None:
+                delta = (mid_now - session.engage_hand_2d).length
+                normalised = delta / max(region.width, 1)
+                if normalised < dead_zone:
+                    self.status = \
+                        f"Scale (dead zone) - {len(session.objects)} object(s)"
+                    return False
+            session.dead_zone_cleared = True
+            # Re-anchor
+            session.two_hand_distance = max((pb - pa).length, 1.0)
+            session.two_hand_angle = math.atan2((pb - pa).y, (pb - pa).x)
+            session.two_hand_mid = mid_now
         a, b = hands[0], hands[1]
         pa = self._hand_anchor_2d(a, region, settings)
         pb = self._hand_anchor_2d(b, region, settings)

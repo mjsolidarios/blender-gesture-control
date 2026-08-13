@@ -14,11 +14,10 @@ Built and tested against **Blender 5.2 LTS** (Python 3.13); requires Blender
 
 1. **Edit > Preferences > Add-ons > Install from Disk**, pick
    `hand_gesture_control-1.1.0.zip`, and enable it.
-2. Still in Preferences, open the add-on's panel and press
-   **Install Dependencies**. This pip-installs MediaPipe and a headless OpenCV
-   into a private folder — a few minutes and roughly 400 MB.
-3. Press **Download Model** to fetch `hand_landmarker.task` (~7 MB).
-4. Press **Re-check**. Everything should show a checkmark.
+2. Still in Preferences, open the add-on's panel and press **Set Up Now**.
+   This installs MediaPipe, a headless OpenCV, and downloads the hand model
+   in one step — a few minutes and roughly 400 MB.
+3. Press **Re-check**. Everything should show a checkmark.
 
 Blender 4.2+ blocks add-on network access by default. If the installer refuses
 to run, enable **Preferences > System > Network > Allow Online Access** first.
@@ -55,7 +54,8 @@ Tracking** so they take effect.
 | **Both hands picking** | Scale: spread the hands to grow, close them to shrink. Optional twist (roll) and two-handed move. |
 | **Index extended**, other fingers folded | Point at an object and dwell to toggle its selection. Supports multi-object select / deselect. |
 
-There is **no single-hand scale** — scaling always needs both hands.
+Optional: **Single-hand scale** — spread thumb and index apart (like a phone
+zoom) to scale with one hand. Enable in Gestures > Single-Hand Scale.
 
 Transforms apply to every selected object, pivoting on the active one. Each
 completed gesture is a single undo step.
@@ -73,15 +73,19 @@ the viewport, and inside the live camera preview.
   halo so it stays legible over light scenes.
 - **Bones** — all 21 connections of the MediaPipe hand topology, faded from the
   proximal to the distal joint so finger direction is readable at a glance.
-- **Pick rings** — a yellow ring on the palm that tightens as all fingertips
-  gather toward the thumb, turning solid green with lines to each tip when the
-  grab engages.
+- **Pick readiness arc** — a radial progress arc around the palm that fills
+  as fingers approach the thumb, giving continuous feedback on how close you
+  are to engaging the pick clutch. Turns solid green when engaged.
 - **Palm anchor** — the white ring marking the exact point that drives the move
   gesture.
-- **Pointing rings** — two rings follow the extended index fingertip, changing
-  from yellow to green as the object-selection dwell completes.
+- **Dwell progress arc** — while pointing at an object, a radial arc around
+  the fingertip fills to show how much dwell time remains.
 - **Hold line** — while a gesture is live, a green line runs from your hand to
   the pivot of whatever you are holding.
+- **Object highlight** — when a pick engages, a bounding-rect outline briefly
+  highlights the affected objects.
+- **Gesture badge** — the HUD shows a `[GRAB]`, `[SCALE]`, or `[IDLE]` badge
+  so you always know which gesture the system recognises.
 - **Landmark numbers** — optional 0–20 badges (**Visual Indicators >
   Landmark Numbers**), useful when tuning or debugging.
 - **Camera preview** — the live feed in a viewport corner with the same
@@ -101,17 +105,32 @@ quad-view or a second window will not show duplicate hands.
   Hold it over an object for *Selection Dwell* seconds; the pointer rings turn
   green as the dwell completes. Available in Object Mode; toggles the object
   under the pointer (add or remove), including multi-object select / deselect.
+- *Tap to Select* — when enabled, curling the index finger while pointing
+  instantly toggles selection without waiting for the dwell timer.
+- *Snap to Nearest* — magnetises the pointing ray to the nearest object
+  within the snap radius, so you do not need sub-pixel steadiness.
 - *Pick Closes* / *Pick Opens* — the hysteresis band for the full-hand pick,
   measured as the average thumb-to-tip distance (index, middle, ring, pinky)
   divided by hand size. Keep "Opens" above "Closes"; widening the gap stops
   the grip flickering.
 - *Move / Rotate / Scale* — sensitivity multipliers (scale applies to
   two-handed gestures only).
+- *Sticky Pick* — when enabled, a quick pick-and-release locks the grab on;
+  a second pick-and-release unlocks it. Reduces hand fatigue.
+- *Dead Zone* — the hand must move this far (normalised) after a pick engages
+  before the object starts following. Prevents initial grab jitter.
+- *Velocity Curve* — slow hand motions map to fine-grained object movement;
+  fast motions map to larger translations.
+- *Hand Loss Grace* — seconds to hold the last object state when a hand
+  disappears mid-gesture before dropping the transform.
+- *Preset Profile* — named bundles (Precise Modeling, Fast Layout,
+  Presentation) that set sensitivity, smoothing, and threshold values.
 
 **Camera & Tracking panel**
 
-- *Camera* — pick a device from the list (press **Detect Cameras** first if
-  the wrong webcam opens). Choose **Other index…** for a manual index.
+- *Camera* — pick a device from the list (cameras are auto-detected on first
+  start; press **Detect Cameras** to refresh). Choose **Other index…** for a
+  manual index.
 - *Resolution* — Fast / Default / Detail presets, or Custom width and height.
 - *Smooth Landmarks* — a One Euro filter. *Steadiness* (lower = smoother when
   still) and *Responsiveness* (higher = less lag when moving fast). If the
@@ -129,6 +148,13 @@ quad-view or a second window will not show duplicate hands.
 
 - *Overlay Detail* — **Full** draws the complete skeleton; **Minimal** keeps
   key joints, pinch rings, and the status readout only.
+
+---
+
+## Quick access
+
+Press **Shift+G** in the 3D Viewport to open a pie menu with Start/Stop,
+Point to Select, Mirror, and Camera Preview toggles.
 
 ---
 

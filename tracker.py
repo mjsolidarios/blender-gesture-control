@@ -292,11 +292,20 @@ class HandTracker:
             while not self._stop.is_set():
                 ok, frame_bgr = cap.read()
                 if not ok or frame_bgr is None:
-                    # Transient read failures happen on USB cameras; only give
-                    # up if they persist.
-                    if time.monotonic() - last_read > 3.0:
-                        raise RuntimeError(
-                            "the camera stopped delivering frames")
+                    # Transient read failures happen on USB cameras.
+                    elapsed = time.monotonic() - last_read
+                    if elapsed > 3.0:
+                        # Try to reconnect before giving up.
+                        try:
+                            cap.release()
+                            cap = self._open_capture()
+                            self._capture = cap
+                            last_read = time.monotonic()
+                            continue
+                        except Exception:
+                            raise RuntimeError(
+                                "the camera stopped delivering frames "
+                                "and reconnection failed")
                     time.sleep(0.01)
                     continue
 

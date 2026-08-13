@@ -65,8 +65,15 @@ class HGC_Preferences(AddonPreferences):
             warn.label(text="Enable it in Preferences > System > Network "
                             "before installing.")
 
+        # One-click setup.
+        setup_row = layout.row(align=True)
+        setup_row.scale_y = 1.5
+        setup_row.enabled = deps.online_access_ok()
+        setup_row.operator("hgc.setup_wizard", icon="IMPORT",
+                           text="Set Up Now")
+
         row = layout.row(align=True)
-        row.scale_y = 1.4
+        row.scale_y = 1.1
         row.enabled = deps.online_access_ok()
         install = row.operator("hgc.install_dependencies", icon="IMPORT",
                                text="Install Dependencies")
