@@ -127,6 +127,41 @@ def _overlay_detail_changed(self, context):
         self.bone_width = 2.5
 
 
+def _preset_changed(self, context):
+    """Apply a named preset profile."""
+    if self.preset_profile == "PRECISE":
+        self.move_sensitivity = 0.5
+        self.rotate_sensitivity = 0.6
+        self.scale_sensitivity = 1.0
+        self.pinch_on = 0.40
+        self.pinch_off = 0.60
+        self.dead_zone = 0.05
+        self.use_velocity_curve = True
+        self.smooth_min_cutoff = 0.8
+        self.smooth_beta = 0.01
+    elif self.preset_profile == "FAST":
+        self.move_sensitivity = 2.0
+        self.rotate_sensitivity = 1.5
+        self.scale_sensitivity = 2.5
+        self.pinch_on = 0.55
+        self.pinch_off = 0.75
+        self.dead_zone = 0.01
+        self.use_velocity_curve = True
+        self.smooth_min_cutoff = 2.0
+        self.smooth_beta = 0.05
+    elif self.preset_profile == "PRESENTATION":
+        self.move_sensitivity = 1.2
+        self.rotate_sensitivity = 1.0
+        self.scale_sensitivity = 1.5
+        self.pinch_on = 0.50
+        self.pinch_off = 0.70
+        self.dead_zone = 0.04
+        self.use_velocity_curve = True
+        self.hand_loss_grace = 1.0
+        self.smooth_min_cutoff = 1.0
+        self.smooth_beta = 0.02
+
+
 class HGC_Settings(PropertyGroup):
     # -- camera ------------------------------------------------------------
 
@@ -287,6 +322,84 @@ class HGC_Settings(PropertyGroup):
         description="How long the index pointer must stay over an object "
                     "before toggling its selection",
     )
+    use_sticky_pick: BoolProperty(
+        name="Sticky Pick",
+        default=False,
+        description="Quick pick-and-release locks the grab on; a second "
+                    "pick-and-release unlocks it. Reduces hand fatigue",
+    )
+    dead_zone: FloatProperty(
+        name="Dead Zone",
+        default=0.03,
+        min=0.0,
+        max=0.15,
+        description="Normalised distance the hand must move after a pick "
+                    "engages before the object starts following. Prevents "
+                    "the initial grab jitter",
+    )
+    use_velocity_curve: BoolProperty(
+        name="Velocity Curve",
+        default=True,
+        description="Slow hand motion maps to fine object movement; fast "
+                    "motion maps to larger translations. Replaces the need "
+                    "to constantly adjust the sensitivity slider",
+    )
+    use_single_hand_scale: BoolProperty(
+        name="Single-Hand Scale",
+        default=False,
+        description="Spread thumb and index finger apart to scale with one "
+                    "hand (like a phone zoom gesture)",
+    )
+    single_hand_scale_sensitivity: FloatProperty(
+        name="Single Scale",
+        default=2.0,
+        min=0.1,
+        max=10.0,
+        description="Multiplier for single-hand thumb-index scale gesture",
+    )
+    use_snap_select: BoolProperty(
+        name="Snap to Nearest",
+        default=True,
+        description="Magnetise the pointing ray to the nearest object "
+                    "within a small threshold when pointing to select",
+    )
+    snap_select_radius: FloatProperty(
+        name="Snap Radius",
+        default=30.0,
+        min=5.0,
+        max=100.0,
+        subtype="PIXEL",
+        description="Pixel radius within which the pointer snaps to the "
+                    "nearest selectable object",
+    )
+    use_tap_select: BoolProperty(
+        name="Tap to Select",
+        default=False,
+        description="Curl the index finger while pointing to instantly "
+                    "select, instead of waiting for the dwell timer",
+    )
+    hand_loss_grace: FloatProperty(
+        name="Hand Loss Grace",
+        default=0.5,
+        min=0.0,
+        max=2.0,
+        subtype="TIME",
+        description="Seconds to hold the last object state when the hand "
+                    "disappears mid-gesture before dropping the transform",
+    )
+    preset_profile: EnumProperty(
+        name="Preset",
+        description="Bundles of sensitivity, smoothing and threshold "
+                    "values for common workflows",
+        items=(
+            ("CUSTOM", "Custom", "Current manual settings"),
+            ("PRECISE", "Precise Modeling", "Low sensitivity, tight thresholds"),
+            ("FAST", "Fast Layout", "High sensitivity, loose thresholds"),
+            ("PRESENTATION", "Presentation", "Balanced, generous grace period"),
+        ),
+        default="CUSTOM",
+        update=_preset_changed,
+    )
 
     # -- display -----------------------------------------------------------
 
@@ -357,6 +470,18 @@ class HGC_Settings(PropertyGroup):
         ),
         default="BOTTOM_RIGHT",
     )
+    use_audio_cue: BoolProperty(
+        name="Audio Cue",
+        default=False,
+        description="Play a subtle click sound when the pick grab "
+                    "engages or disengages",
+    )
+    tutorial_shown: BoolProperty(
+        name="Tutorial Shown",
+        default=False,
+        description="Whether the interactive tutorial has been displayed",
+        options={"HIDDEN"},
+    )
 
     # -- performance -------------------------------------------------------
 
@@ -373,14 +498,19 @@ SETTING_GROUPS = {
         "pinch_on", "pinch_off", "move_sensitivity", "use_depth",
         "depth_sensitivity", "rotate_sensitivity", "scale_sensitivity",
         "use_two_hand", "two_hand_translate", "use_point_select",
-        "point_select_dwell",
+        "point_select_dwell", "use_sticky_pick", "dead_zone",
+        "use_velocity_curve", "use_single_hand_scale",
+        "single_hand_scale_sensitivity", "use_snap_select",
+        "snap_select_radius", "use_tap_select", "hand_loss_grace",
+        "preset_profile",
     ),
     "DISPLAY": (
         "show_overlay", "overlay_detail", "show_skeleton", "show_preview",
         "show_preview_landmarks", "show_landmark_indices",
         "show_hand_labels", "show_hud", "landmark_size", "bone_width",
         "overlay_opacity", "preview_size", "preview_margin",
-        "preview_opacity", "preview_corner",
+        "preview_opacity", "preview_corner", "use_audio_cue",
+        "tutorial_shown",
     ),
     "TRACKING": (
         "camera_index", "camera_backend", "capture_preset",

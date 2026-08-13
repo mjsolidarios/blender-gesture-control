@@ -25,6 +25,7 @@ import blf
 import bpy
 import gpu
 from gpu_extras.batch import batch_for_shader
+from mathutils import Vector
 
 from . import landmarks as LM
 from .gestures import (MODE_GRAB, MODE_LABELS, MODE_NONE, MODE_TWO_HAND,
@@ -97,6 +98,26 @@ def _append_ring(verts, colors, center, radius, width, color, segments=28):
         a1 = (i + 1) * 2.0 * math.pi / segments
         c0, s0 = math.cos(a0), math.sin(a0)
         c1, s1 = math.cos(a1), math.sin(a1)
+        p0i = (cx + c0 * inner, cy + s0 * inner)
+        p0o = (cx + c0 * outer, cy + s0 * outer)
+        p1i = (cx + c1 * inner, cy + s1 * inner)
+        p1o = (cx + c1 * outer, cy + s1 * outer)
+        verts.extend((p0i, p0o, p1o, p0i, p1o, p1i))
+        colors.extend((color,) * 6)
+
+
+def _append_arc(verts, colors, center, radius, width, color, progress,
+                segments=28):
+    """Emit a partial annulus (arc) as TRIS, showing progress 0..1."""
+    cx, cy = center[0], center[1]
+    inner = max(radius - width * 0.5, 0.1)
+    outer = radius + width * 0.5
+    arc_segments = max(1, int(segments * max(0.0, min(progress, 1.0))))
+    for i in range(arc_segments):
+        a0 = i * 2.0 * math.pi * progress / arc_segments
+        a1 = (i + 1) * 2.0 * math.pi * progress / arc_segments
+        c0, s0 = math.cos(a0 - math.pi / 2), math.sin(a0 - math.pi / 2)
+        c1, s1 = math.cos(a1 - math.pi / 2), math.sin(a1 - math.pi / 2)
         p0i = (cx + c0 * inner, cy + s0 * inner)
         p0o = (cx + c0 * outer, cy + s0 * outer)
         p1i = (cx + c1 * inner, cy + s1 * inner)
@@ -254,11 +275,14 @@ class Overlay:
         self.snapshot = None
         self.engine = None
         self.settings = None
+        self._fade_alpha = {}
         self.status_text = ""
         self.error_text = ""
         self.fps = 0.0
         self.preview = PreviewTexture()
         self.target_area = None
+        self.tutorial_step = -1  # -1 = not showing, 0..3 = active steps
+        self._tutorial_start = 0.0
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -327,9 +351,11 @@ class Overlay:
                 self._draw_hands(region, snapshot, settings)
             if snapshot is not None:
                 self._draw_pivot_link(context, region, snapshot, settings)
+                self._draw_grab_highlight(context, region)
                 self._draw_point_pointer(region)
             if settings.show_hud:
                 self._draw_hud(region, snapshot, settings)
+            self._draw_tutorial(region)
         finally:
             gpu.state.blend_set("NONE")
 
@@ -472,7 +498,7 @@ class Overlay:
                                  (colour[0], colour[1], colour[2],
                                   0.95 * alpha))
                 elif grab.ratio < settings.pinch_off * 1.6:
-                    # Proximity: ring tightens as the whole hand gathers.
+                    # Proximity: radial arc fills as the hand gathers.
                     t = max(0.0, min(1.0,
                             (settings.pinch_off * 1.6 - grab.ratio)
                             / max(settings.pinch_off * 1.2, 1e-3)))
@@ -480,9 +506,13 @@ class Overlay:
                     anchor = self._map((cx, cy, 0.0), region, rect, scale,
                                        settings.mirror)
                     _append_ring(tris_v, tris_c, anchor,
-                                 joint_radius * (1.8 + 1.8 * t),
-                                 1.6 * scale,
-                                 (1.0, 0.85, 0.3, 0.15 + 0.6 * t * alpha))
+                                 joint_radius * 3.0, 1.4 * scale,
+                                 (0.5, 0.45, 0.2, 0.12 * alpha))
+                    arc_color = (1.0 - 0.6 * t, 0.72 + 0.28 * t,
+                                 0.18 + 0.37 * t, (0.3 + 0.65 * t) * alpha)
+                    _append_arc(tris_v, tris_c, anchor,
+                                joint_radius * 3.0, 2.2 * scale,
+                                arc_color, t)
 
             # --- palm anchor: the point the move gesture actually follows ---
             cx, cy = palm_center(hand.image_pts)
@@ -518,8 +548,14 @@ class Overlay:
         verts, colors = [], []
         _append_ring(verts, colors, engine.point_2d, 12.0, 2.5, colour)
         if engine.pointed_object is not None:
-            _append_ring(verts, colors, engine.point_2d,
-                         17.0 - 4.0 * progress, 1.5, colour)
+            _append_ring(verts, colors, engine.point_2d, 18.0, 2.0,
+                         (0.4, 0.4, 0.45, 0.25))
+            if progress > 0.0 and progress < 1.0:
+                _append_arc(verts, colors, engine.point_2d, 18.0, 3.0,
+                            colour, progress)
+            elif progress >= 1.0:
+                _append_ring(verts, colors, engine.point_2d, 18.0, 3.0,
+                             (0.25, 1.0, 0.55, 0.95))
         _draw_tris(verts, colors)
 
     def _draw_indices(self, region, snapshot, settings, rect, scale, alpha):
@@ -572,6 +608,37 @@ class Overlay:
                      (0.25, 1.0, 0.55, 0.9))
         _draw_tris(tris_v, tris_c)
 
+    def _draw_grab_highlight(self, context, region):
+        """Flash a highlight outline around grabbed objects."""
+        engine = self.engine
+        if engine is None or engine.session is None:
+            return
+        rv3d = context.region_data
+        if rv3d is None:
+            return
+        from bpy_extras import view3d_utils
+
+        for obj in engine.session.objects:
+            try:
+                bbox = [obj.matrix_world @ Vector(corner)
+                        for corner in obj.bound_box]
+            except (ReferenceError, AttributeError):
+                continue
+            pts_2d = []
+            for corner in bbox:
+                p = view3d_utils.location_3d_to_region_2d(region, rv3d, corner)
+                if p is not None:
+                    pts_2d.append(p)
+            if len(pts_2d) < 2:
+                continue
+            xs = [p.x for p in pts_2d]
+            ys = [p.y for p in pts_2d]
+            x_min, x_max = min(xs) - 4, max(xs) + 4
+            y_min, y_max = min(ys) - 4, max(ys) + 4
+            highlight_color = (0.25, 1.0, 0.55, 0.35)
+            _draw_rect_outline(x_min, y_min, x_max - x_min, y_max - y_min,
+                               highlight_color, 2.0, region)
+
     # -- heads-up display --------------------------------------------------
 
     def _draw_hud(self, region, snapshot, settings):
@@ -593,20 +660,24 @@ class Overlay:
         active = mode != MODE_NONE
         minimal = getattr(settings, "overlay_detail", "FULL") == "MINIMAL"
 
-        # Colour the mode title by channel.
+        # Colour and badge the mode title by channel.
         if mode == MODE_GRAB:
             title_color = (0.35, 1.0, 0.55, 1.0)
+            badge = "[GRAB]"
         elif mode == MODE_TWO_HAND:
             title_color = (0.75, 0.55, 1.0, 1.0)
+            badge = "[SCALE]"
         elif active:
             title_color = (0.35, 1.0, 0.6, 1.0)
+            badge = "[ACTIVE]"
         else:
             title_color = (0.85, 0.88, 0.95, 0.95)
+            badge = "[IDLE]"
 
         # Lines are listed top-to-bottom, then drawn bottom-up.
         lines = [
             (15.0, title_color,
-             f"Gesture · {MODE_LABELS.get(mode, mode)}"),
+             f"Gesture {badge} · {MODE_LABELS.get(mode, mode)}"),
             (12.0, (0.78, 0.80, 0.86, 0.9),
              self.status_text or "Show your hand to the camera"),
         ]
@@ -637,6 +708,64 @@ class Overlay:
             blf.position(font, x, y, 0)
             blf.draw(font, text)
             y -= line_height
+
+    def _draw_tutorial(self, region):
+        """Draw a semi-transparent tutorial overlay with step-by-step guidance."""
+        if self.tutorial_step < 0:
+            return
+
+        steps = [
+            "Step 1: Show your hand to the camera",
+            "Step 2: Close all fingers to your thumb (pick gesture)",
+            "Step 3: Move your hand to move the object",
+            "Step 4: Open your hand to release — you're ready!",
+        ]
+
+        engine = self.engine
+        step = self.tutorial_step
+
+        # Auto-advance based on gesture state.
+        if engine is not None:
+            import time
+            now = time.monotonic()
+            if step == 0 and self.snapshot and self.snapshot.hands:
+                self.tutorial_step = 1
+                self._tutorial_start = now
+            elif step == 1 and engine.mode != "NONE":
+                self.tutorial_step = 2
+                self._tutorial_start = now
+            elif step == 2 and now - self._tutorial_start > 3.0:
+                self.tutorial_step = 3
+                self._tutorial_start = now
+            elif step == 3 and now - self._tutorial_start > 3.0:
+                self.tutorial_step = -1  # Done
+                return
+            step = self.tutorial_step
+            if step < 0:
+                return
+
+        if step >= len(steps):
+            self.tutorial_step = -1
+            return
+
+        # Draw semi-transparent backdrop at the top.
+        w = region.width
+        box_h = 60
+        y = region.height - box_h - 10
+        _draw_rect(10, y, w - 20, box_h, (0.05, 0.05, 0.08, 0.75))
+        _draw_rect_outline(10, y, w - 20, box_h,
+                           (0.4, 0.85, 0.55, 0.8), 1.5, region)
+
+        font = 0
+        _set_font_size(font, 16.0)
+        blf.color(font, 0.9, 0.95, 1.0, 1.0)
+        blf.position(font, 24, y + 34, 0)
+        blf.draw(font, steps[step])
+
+        _set_font_size(font, 11.0)
+        blf.color(font, 0.6, 0.65, 0.7, 0.9)
+        blf.position(font, 24, y + 12, 0)
+        blf.draw(font, f"Step {step + 1} of {len(steps)}  ·  Press Esc to skip tutorial")
 
 
 #: Module-level singleton; the operator and the panel both talk to this.

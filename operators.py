@@ -131,6 +131,67 @@ class HGC_OT_refresh_status(Operator):
         return {"FINISHED"}
 
 
+class HGC_OT_setup_wizard(Operator):
+    bl_idname = "hgc.setup_wizard"
+    bl_label = "Set Up Now"
+    bl_description = ("Install dependencies and download the hand model in "
+                      "one step. Needs an internet connection and about 400 MB")
+    bl_options = {"REGISTER", "INTERNAL"}
+
+    def execute(self, context):
+        if not deps.online_access_ok():
+            self.report({"ERROR"},
+                        "Blender's online access is off. Enable it in "
+                        "Preferences > System > Network, then try again")
+            return {"CANCELLED"}
+
+        lines = []
+
+        def log(text):
+            lines.append(str(text))
+            print("[HandGestureControl]", text)
+
+        wm = context.window_manager
+        wm.progress_begin(0, 3)
+
+        # Step 1: install packages
+        wm.progress_update(0)
+        log("--- Step 1/3: Installing packages ---")
+        ok = deps.install(log=log)
+        if not ok:
+            wm.progress_end()
+            tail = " | ".join(lines[-3:]) if lines else "see console"
+            self.report({"ERROR"}, f"Install failed: {tail}")
+            return {"CANCELLED"}
+
+        # Step 2: download model
+        wm.progress_update(1)
+        log("--- Step 2/3: Downloading hand model ---")
+        ok = deps.download_model(log=log)
+        if not ok:
+            wm.progress_end()
+            self.report({"ERROR"}, "Model download failed")
+            return {"CANCELLED"}
+
+        # Step 3: verify
+        wm.progress_update(2)
+        log("--- Step 3/3: Verifying ---")
+        deps.invalidate()
+        status = deps.check(force=True)
+        wm.progress_end()
+
+        if status["ready"]:
+            self.report({"INFO"},
+                        f"Setup complete — mediapipe {status['mediapipe']}, "
+                        f"opencv {status['cv2']}")
+            return {"FINISHED"}
+
+        self.report({"ERROR"},
+                    "Setup finished but verification failed. "
+                    "Press Re-check or see the system console")
+        return {"CANCELLED"}
+
+
 class HGC_OT_probe_cameras(Operator):
     bl_idname = "hgc.probe_cameras"
     bl_label = "Detect Cameras"
@@ -252,6 +313,10 @@ class HGC_OT_start(Operator):
     _smooth_world = None
     _last_frame_id = -1
     _generation = 0
+    _prev_snapshot = None
+    _current_snapshot = None
+    _prev_time = 0.0
+    _timer_interval = 0.0
 
     @classmethod
     def poll(cls, context):
@@ -278,6 +343,16 @@ class HGC_OT_start(Operator):
                         "Hand model is missing. Use Download Hand Model in "
                         "this panel or in Preferences")
             return {"CANCELLED"}
+
+        # Auto-detect camera if no probe has been done yet.
+        if not session.camera_list():
+            found = probe_cameras()
+            if found:
+                session.set_camera_list(found)
+                cfg_tmp = settings_mod.get(context)
+                indices = {index for index, _ in found}
+                if cfg_tmp.camera_index not in indices:
+                    cfg_tmp.camera_index = found[0][0]
 
         cfg = settings_mod.get(context)
 
@@ -309,6 +384,9 @@ class HGC_OT_start(Operator):
         self._smooth_image = LandmarkSmoother(num_hands=4)
         self._smooth_world = LandmarkSmoother(num_hands=4)
         self._last_frame_id = -1
+        self._prev_snapshot = None
+        self._current_snapshot = None
+        self._prev_time = 0.0
         self._area = context.area
 
         overlay.engine = engine
@@ -316,10 +394,19 @@ class HGC_OT_start(Operator):
         overlay.target_area = context.area
         overlay.error_text = ""
         overlay.status_text = "Show your hand to the camera"
+        # Show tutorial on first run.
+        if not cfg.tutorial_shown:
+            import time as _time
+            overlay.tutorial_step = 0
+            overlay._tutorial_start = _time.monotonic()
+            cfg.tutorial_shown = True
+        else:
+            overlay.tutorial_step = -1
         overlay.enable()
 
         wm = context.window_manager
-        self._timer = wm.event_timer_add(1.0 / max(cfg.update_rate, 10),
+        self._timer_interval = 1.0 / max(cfg.update_rate, 10)
+        self._timer = wm.event_timer_add(self._timer_interval,
                                          window=context.window)
         wm.modal_handler_add(self)
         overlay.tag_redraw()
@@ -382,7 +469,29 @@ class HGC_OT_start(Operator):
         snapshot = tracker.latest()
         overlay.fps = tracker.fps
 
+        # Predictive interpolation: fill in between inference frames.
         fresh = snapshot.frame_id != self._last_frame_id
+        if (not fresh and self._current_snapshot is not None
+                and self._prev_snapshot is not None and snapshot.hands):
+            now = time.monotonic()
+            dt = now - self._prev_time
+            if 0 < dt < 0.1:  # Only interpolate short gaps
+                for hand in snapshot.hands:
+                    cur_points = self._current_snapshot.get(hand.slot)
+                    prev_points = self._prev_snapshot.get(hand.slot)
+                    if cur_points is None or prev_points is None:
+                        continue
+                    # Linearly extrapolate each landmark.
+                    new_img = []
+                    for cur, prev in zip(cur_points, prev_points):
+                        vx = (cur[0] - prev[0])
+                        vy = (cur[1] - prev[1])
+                        vz = (cur[2] - prev[2])
+                        new_img.append((cur[0] + vx * 0.3,
+                                        cur[1] + vy * 0.3,
+                                        cur[2] + vz * 0.3))
+                    hand.image_pts = new_img
+
         self._last_frame_id = snapshot.frame_id
 
         if cfg.use_smoothing and snapshot.hands and fresh:
@@ -398,6 +507,13 @@ class HGC_OT_start(Operator):
             self._smooth_image.reset()
             self._smooth_world.reset()
 
+        if fresh:
+            self._prev_snapshot = self._current_snapshot
+            self._current_snapshot = {
+                hand.slot: tuple(hand.image_pts) for hand in snapshot.hands
+            }
+            self._prev_time = time.monotonic()
+
         overlay.snapshot = snapshot
 
         region, rv3d = self._view(context)
@@ -410,6 +526,23 @@ class HGC_OT_start(Operator):
         if session.is_dirty():
             parts.append("restart to apply camera settings")
         overlay.status_text = "  |  ".join(parts)
+
+        # Adaptive update rate: match poll interval to actual camera fps.
+        if tracker.fps > 5:
+            ideal_interval = 1.0 / max(tracker.fps * 1.1, 10)
+            current_interval = (self._timer_interval
+                                or 1.0 / max(cfg.update_rate, 10))
+            # Only adjust if the difference is significant.
+            if abs(ideal_interval - current_interval) > 0.005:
+                wm = context.window_manager
+                if self._timer is not None:
+                    try:
+                        wm.event_timer_remove(self._timer)
+                    except Exception:
+                        pass
+                self._timer = wm.event_timer_add(
+                    ideal_interval, window=context.window)
+                self._timer_interval = ideal_interval
 
     def _view(self, context):
         """The region and view matrix of the viewport this session owns."""
@@ -440,6 +573,7 @@ class HGC_OT_start(Operator):
             except Exception:
                 pass
             self._timer = None
+            self._timer_interval = 0.0
 
     def _finish(self, context):
         self._release_timer(context)
@@ -470,6 +604,7 @@ classes = (
     HGC_OT_download_model,
     HGC_OT_uninstall_dependencies,
     HGC_OT_refresh_status,
+    HGC_OT_setup_wizard,
     HGC_OT_probe_cameras,
     HGC_OT_reset_settings,
     HGC_OT_start,

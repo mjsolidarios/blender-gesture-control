@@ -11,6 +11,7 @@ from bpy.types import Panel
 from . import deps, session, settings as settings_mod
 
 CATEGORY = "Gesture"
+_keymaps = []
 
 # Compact gesture map shown on the main panel and in the Gestures section.
 _GESTURE_ROWS = (
@@ -135,15 +136,11 @@ class HGC_PT_main(_Base, Panel):
             else:
                 tip.label(text="Select an object in the viewport first.")
 
-        # ---- always-visible gesture map (first-run discoverability) ----
-        if not running:
-            _draw_gesture_map(layout, title="Gestures", show_hint=True)
-        else:
-            # Compact reminder while live — full map is one click away.
-            row = layout.row()
-            row.scale_y = 0.9
-            row.label(text="pick=move+rotate · two hands=scale",
-                      icon="HAND")
+        # ---- compact gesture reminder (full map in Gestures panel) ----
+        row = layout.row()
+        row.scale_y = 0.9
+        row.label(text="pick=move+rotate · two hands=scale",
+                  icon="HAND")
 
     def _draw_setup(self, layout, status):
         box = layout.box()
@@ -173,13 +170,20 @@ class HGC_PT_main(_Base, Panel):
         actions = box.column(align=True)
         actions.scale_y = 1.3
         actions.enabled = deps.online_access_ok()
+        # One-click setup: installs packages and downloads the model.
+        actions.operator("hgc.setup_wizard",
+                         icon="IMPORT", text="Set Up Now")
+        # Individual steps, for advanced users or partial re-installs.
+        sub = box.column(align=True)
+        sub.scale_y = 1.0
+        sub.enabled = deps.online_access_ok()
         if (not status["mediapipe"] or not status["cv2"]
                 or not status["numpy"]):
-            actions.operator("hgc.install_dependencies",
-                             icon="IMPORT", text="Install Dependencies")
+            sub.operator("hgc.install_dependencies",
+                         icon="IMPORT", text="Install Dependencies Only")
         if not status["model"]:
-            actions.operator("hgc.download_model", icon="URL",
-                             text="Download Hand Model")
+            sub.operator("hgc.download_model", icon="URL",
+                         text="Download Model Only")
         box.operator("hgc.refresh_status", icon="FILE_REFRESH",
                      text="Re-check")
 
@@ -209,6 +213,10 @@ class HGC_PT_gestures(_Base, Panel):
         layout.use_property_split = True
         layout.use_property_decorate = False
         cfg = settings_mod.get(context)
+
+        # Preset profile selector.
+        col = layout.column(align=True)
+        col.prop(cfg, "preset_profile")
 
         _draw_gesture_map(layout, title="Gesture mapping", show_hint=False)
 
@@ -251,6 +259,31 @@ class HGC_PT_gestures(_Base, Panel):
         sub.enabled = cfg.use_two_hand
         sub.prop(cfg, "two_hand_translate")
 
+        col = layout.column(align=True)
+        col.prop(cfg, "use_sticky_pick")
+
+        col = layout.column(align=True)
+        col.prop(cfg, "use_single_hand_scale")
+        sub = col.row()
+        sub.enabled = cfg.use_single_hand_scale
+        sub.prop(cfg, "single_hand_scale_sensitivity")
+
+        box = layout.box()
+        box.label(text="Advanced", icon="PREFERENCES")
+        col = box.column(align=True)
+        col.prop(cfg, "dead_zone", slider=True)
+        col.prop(cfg, "use_velocity_curve")
+        col.prop(cfg, "hand_loss_grace")
+
+        box = layout.box()
+        box.label(text="Point selection", icon="RESTRICT_SELECT_OFF")
+        col = box.column(align=True)
+        col.prop(cfg, "use_snap_select")
+        sub = col.row()
+        sub.enabled = cfg.use_snap_select
+        sub.prop(cfg, "snap_select_radius")
+        col.prop(cfg, "use_tap_select")
+
         _reset_button(layout, "GESTURES", "Reset Gesture Settings")
 
 
@@ -288,6 +321,7 @@ class HGC_PT_display(_Base, Panel):
         col.prop(cfg, "show_landmark_indices")
         col.prop(cfg, "show_hand_labels")
         col.prop(cfg, "show_hud")
+        col.prop(cfg, "use_audio_cue")
 
         header = layout.row()
         header.prop(cfg, "show_preview")
@@ -393,11 +427,31 @@ class HGC_PT_camera(_Base, Panel):
         reset.enabled = not running
 
 
+class HGC_MT_pie(bpy.types.Menu):
+    bl_idname = "HGC_MT_pie"
+    bl_label = "Hand Gesture Control"
+
+    def draw(self, context):
+        layout = self.layout
+        pie = layout.menu_pie()
+        cfg = settings_mod.get(context)
+        running = session.is_running()
+
+        if running:
+            pie.operator("hgc.stop", icon="PAUSE", text="Stop Tracking")
+        else:
+            pie.operator("hgc.start", icon="PLAY", text="Start Tracking")
+        pie.prop(cfg, "use_point_select", toggle=True)
+        pie.prop(cfg, "mirror", toggle=True)
+        pie.prop(cfg, "show_preview", toggle=True)
+
+
 classes = (
     HGC_PT_main,
     HGC_PT_gestures,
     HGC_PT_display,
     HGC_PT_camera,
+    HGC_MT_pie,
 )
 
 
@@ -405,7 +459,21 @@ def register():
     for cls in classes:
         bpy.utils.register_class(cls)
 
+    # Pie menu keymap: Shift+G in the 3D Viewport.
+    wm = bpy.context.window_manager
+    if wm.keyconfigs.addon:
+        km = wm.keyconfigs.addon.keymaps.new(
+            name="3D View", space_type="VIEW_3D")
+        kmi = km.keymap_items.new("wm.call_menu_pie", "G", "PRESS",
+                                  shift=True)
+        kmi.properties.name = "HGC_MT_pie"
+        _keymaps.append((km, kmi))
+
 
 def unregister():
+    for km, kmi in _keymaps:
+        km.keymap_items.remove(kmi)
+    _keymaps.clear()
+
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
