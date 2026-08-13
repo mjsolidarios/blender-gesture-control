@@ -13,7 +13,7 @@ Built and tested against **Blender 5.2 LTS** (Python 3.13); requires Blender
 ## Install
 
 1. **Edit > Preferences > Add-ons > Install from Disk**, pick
-   `hand_gesture_control-1.1.0.zip`, and enable it.
+   `hand_gesture_control-1.2.0.zip`, and enable it.
 2. Still in Preferences, open the add-on's panel and press **Set Up Now**.
    This installs MediaPipe, a headless OpenCV, and downloads the hand model
    in one step — a few minutes and roughly 400 MB.
